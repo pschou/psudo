@@ -2,12 +2,15 @@ package main
 
 import (
 	"bytes"
+	"crypto/rand"
+	"encoding/hex"
 	"flag"
 	"fmt"
 	"io"
 	"log"
 	"net"
 	"os"
+	"path/filepath"
 	"regexp"
 	"strings"
 
@@ -75,7 +78,7 @@ func main() {
 		User: username,
 		Auth: []ssh.AuthMethod{
 			ssh.Password(pass),
-			ssh.KeyboardInteractive(SshInteractive),
+			//ssh.KeyboardInteractive(SshInteractive),
 		},
 		HostKeyCallback: ssh.InsecureIgnoreHostKey(),
 	}
@@ -139,6 +142,7 @@ func main() {
 
 // Send the script over the ssh connection
 func sendScript(host string, client *ssh.Client) error {
+	tempFull, tempShort := TempFileName("psudo-", ".sh")
 	{
 		session, err := client.NewSession()
 		if err != nil {
@@ -163,7 +167,7 @@ func sendScript(host string, client *ssh.Client) error {
 				file_sent <- err
 			}
 			defer hostIn.Close()
-			fmt.Fprintf(hostIn, "C0600 %d %s\n", stat.Size(), "sudo-ssh-temp")
+			fmt.Fprintf(hostIn, "C0600 %d %s\n", stat.Size(), tempShort)
 			_, err = io.Copy(hostIn, file)
 			if err != nil {
 				file_sent <- err
@@ -207,9 +211,9 @@ func sendScript(host string, client *ssh.Client) error {
 		stdout, _ := session.StdoutPipe()
 		//stderr, _ := session.StderrPipe() // never used, so maybe setup a fifo?
 		if *debug {
-			session.Start("/usr/bin/bash -c $'PS4=\\'#${LINENO} \\w$ \\' /usr/bin/bash -ex /tmp/sudo-ssh-temp'")
+			session.Start("/usr/bin/bash -c $'PS4=\\'#${LINENO} \\w$ \\' /usr/bin/bash -ex " + tempFull + "'")
 		} else {
-			session.Start("/usr/bin/bash -e /tmp/sudo-ssh-temp")
+			session.Start("/usr/bin/bash -e " + tempFull)
 		}
 
 		// Read the input from the reader and print it to the screen
@@ -281,12 +285,13 @@ func sendScript(host string, client *ssh.Client) error {
 			return err
 		}
 		defer session.Close()
-		session.Run("/usr/bin/rm /tmp/sudo-ssh-temp")
+		session.Run("/usr/bin/rm " + tempFull)
 	}
 	//fmt.Println("returning")
 	return nil
 }
 
+// Interactive login handler, answer a password question
 func SshInteractive(user, instruction string, questions []string, echos []bool) (answers []string, err error) {
 	sshInteractiveTries++
 	if sshInteractiveTries > 1 && !sshWorked {
@@ -299,4 +304,11 @@ func SshInteractive(user, instruction string, questions []string, echos []bool) 
 	}
 
 	return answers, nil
+}
+
+// Generate a temp file name
+func TempFileName(prefix, suffix string) (full, short string) {
+	randBytes := make([]byte, 16)
+	rand.Read(randBytes)
+	return filepath.Join(os.TempDir(), prefix+hex.EncodeToString(randBytes)+suffix), prefix + hex.EncodeToString(randBytes) + suffix
 }
