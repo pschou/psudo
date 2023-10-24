@@ -17,13 +17,15 @@ import (
 	ansi "github.com/leaanthony/go-ansi-parser"
 	"github.com/remeh/sizedwaitgroup"
 	"golang.org/x/crypto/ssh"
+	"golang.org/x/crypto/ssh/agent"
 )
 
 var (
 	hosts               = flag.String("h", "", "Read hosts from given host file")
 	script              = flag.String("s", "", "Script to execute remotely")
 	parallel            = flag.Int("p", 4, "Maximum concurrent connections allowed")
-	identity            = flag.String("i", "", "SSH identity file for login")
+	identity            = flag.String("i", "", "SSH identity file for login, the private key for single use")
+	disableAgent        = flag.Bool("A", false, "Disable SSH agent forwarding")
 	debug               = flag.Bool("d", false, "Turn on script debugging")
 	passwordMatch       = flag.String("pw", `^\[sudo\] password for `, "Send password for line matching")
 	username, pass      string
@@ -35,11 +37,15 @@ var (
 
 func main() {
 	flag.Usage = func() {
-		fmt.Fprintln(os.Stderr, "Parallel Remote SUDO, Version", version)
+		fmt.Fprintln(os.Stderr, "Parallel Remote SUDO, Version", version, "(https://github.com/pschou/psudo)")
 		fmt.Fprintln(os.Stderr, "Usage of "+os.Args[0]+":")
 		flag.PrintDefaults()
 	}
 	flag.Parse()
+	if *hosts == "" || *script == "" {
+		flag.Usage()
+		os.Exit(1)
+	}
 	passwordRegex = regexp.MustCompile(*passwordMatch)
 
 	// Read host list
@@ -71,7 +77,6 @@ func main() {
 	if err != nil {
 		log.Fatal(err)
 	}
-	//fmt.Println("user", username, "pass", pass)
 
 	// Build configuration for ssh
 	config := &ssh.ClientConfig{
@@ -83,6 +88,18 @@ func main() {
 		HostKeyCallback: ssh.InsecureIgnoreHostKey(),
 	}
 	//fmt.Printf("config %#v\n", config)
+
+	// Enable the use of an SSH agent
+	var sshAgent *agent.ExtendedAgent
+	if socket := os.Getenv("SSH_AUTH_SOCK"); socket != "" && !*disableAgent {
+		conn, err := net.Dial("unix", socket)
+		if err != nil {
+			log.Fatalf("Failed to open SSH_AUTH_SOCK: %v", err)
+		}
+		agentClient := agent.NewClient(conn)
+		sshAgent = &agentClient
+		config.Auth = append([]ssh.AuthMethod{ssh.PublicKeysCallback(agentClient.Signers)}, config.Auth...)
+	}
 
 	// Parse the identity from the private key for SSH login
 	if *identity != "" {
@@ -121,7 +138,7 @@ func main() {
 			defer client.Close()
 
 			// Attempt initial send to one client
-			err = sendScript(strings.TrimSuffix(host, ":22"), client)
+			err = sendScript(strings.TrimSuffix(host, ":22"), client, sshAgent)
 			if err != nil {
 				log.Println(host, err)
 				return
@@ -141,8 +158,11 @@ func main() {
 }
 
 // Send the script over the ssh connection
-func sendScript(host string, client *ssh.Client) error {
+func sendScript(host string, client *ssh.Client, sshAgent *agent.ExtendedAgent) error {
 	tempFull, tempShort := TempFileName("psudo-", ".sh")
+	/*
+	 * SSH session for transferring the script
+	 */
 	{
 		session, err := client.NewSession()
 		if err != nil {
@@ -185,12 +205,19 @@ func sendScript(host string, client *ssh.Client) error {
 		}
 	}
 
+	/*
+	 * SSH session for running the script with password handling
+	 */
 	{
 		session, err := client.NewSession()
 		if err != nil {
 			return err
 		}
 		defer session.Close()
+		if sshAgent != nil {
+			agent.ForwardToAgent(client, *sshAgent)
+			agent.RequestAgentForwarding(session)
+		}
 
 		modes := ssh.TerminalModes{
 			ssh.ECHO:          0,     // Disable echoing
@@ -279,6 +306,9 @@ func sendScript(host string, client *ssh.Client) error {
 		//<-b
 	}
 
+	/*
+	 * SSH session for clean up after running the script
+	 */
 	{
 		session, err := client.NewSession()
 		if err != nil {
