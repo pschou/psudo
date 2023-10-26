@@ -1,7 +1,6 @@
 package main
 
 import (
-	"bufio"
 	"fmt"
 	"log"
 	"os"
@@ -13,24 +12,17 @@ import (
 )
 
 func credentials() (string, string, error) {
-	currentUser, err := user.Current()
-	if err != nil {
-		log.Fatalf(err.Error())
-	}
-	name := currentUser.Name
-
-	reader := bufio.NewReader(os.Stdin)
-
-	fmt.Print("Enter Username [default: ", name, "]: ")
-	username, err := reader.ReadString('\n')
-	if err != nil {
-		return "", "", err
-	}
-	if strings.TrimSpace(username) == "" {
-		username = name
+	if strings.TrimSpace(*userSetting) == "" {
+		currentUser, err := user.Current()
+		if err != nil {
+			log.Fatalf(err.Error())
+		}
+		username = currentUser.Username
+	} else {
+		username = *userSetting
 	}
 
-	fmt.Print("Enter Password: ")
+	fmt.Fprintf(os.Stderr, "Enter Password for %q: ", username)
 	bytePassword, err := term.ReadPassword(int(syscall.Stdin))
 	fmt.Println()
 	if err != nil {

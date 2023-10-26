@@ -17,6 +17,7 @@ cat<<'EOF'
 EOF
 echo -e "\e[mReset Colors"
 ls --color=auto -latr /var/
-sudo date
+sudo yum clean all
+sudo yum check-update
 echo yay
 

@@ -13,6 +13,7 @@ import (
 	"path/filepath"
 	"regexp"
 	"strings"
+	"time"
 
 	ansi "github.com/leaanthony/go-ansi-parser"
 	"github.com/remeh/sizedwaitgroup"
@@ -21,8 +22,11 @@ import (
 )
 
 var (
-	hosts               = flag.String("h", "", "Read hosts from given host file")
+	userSetting         = flag.String("u", "", "Use this user rather than the current user")
+	hostListFile        = flag.String("h", "", "Read hosts from given host file")
+	hostListString      = flag.String("H", "", "List of hosts defined in a quoted string \"host1, host2\"")
 	script              = flag.String("s", "", "Script to execute remotely")
+	command             = flag.String("c", "", "Command to execute remotely")
 	parallel            = flag.Int("p", 4, "Maximum concurrent connections allowed")
 	identity            = flag.String("i", "", "SSH identity file for login, the private key for single use")
 	disableAgent        = flag.Bool("A", false, "Disable SSH agent forwarding")
@@ -33,6 +37,7 @@ var (
 	sshWorked           bool
 	passwordRegex       *regexp.Regexp
 	version             string
+	shortList           []string
 )
 
 func main() {
@@ -42,37 +47,54 @@ func main() {
 		flag.PrintDefaults()
 	}
 	flag.Parse()
-	if *hosts == "" || *script == "" {
+	if (*hostListFile == "" && *hostListString == "") || (*script == "" && *command == "") {
 		flag.Usage()
 		os.Exit(1)
 	}
 	passwordRegex = regexp.MustCompile(*passwordMatch)
 
-	// Read host list
-	hostList, err := readLines(*hosts)
-	if err != nil {
-		log.Fatal(err)
-	}
+	// Host list from command line
+	hostList := strings.FieldsFunc(*hostListString, func(c rune) bool {
+		return c == ',' || c == ' '
+	})
 
-	// Loop over hosts to verify that the TCP port is connectable
-	for i, host := range hostList {
-		if _, _, err := net.SplitHostPort(host); err != nil {
-			host = net.JoinHostPort(host, "22")
-			hostList[i] = host
-		}
-		conn, err := net.Dial("tcp", host)
+	if *hostListFile != "" {
+		// Read host list from file
+		fileHostList, err := readLines(*hostListFile)
 		if err != nil {
 			log.Fatal(err)
 		}
-		conn.Close()
+		hostList = append(hostList, fileHostList...)
 	}
-	fmt.Println(len(hostList), "hosts loaded")
+
+	hostList = dedup(hostList)
+	{ // Loop over hosts to verify that the TCP port is connectable
+		var newHostList []string
+		d := net.Dialer{Timeout: 3 * time.Second}
+		for i, host := range hostList {
+			if _, _, err := net.SplitHostPort(host); err != nil {
+				host = net.JoinHostPort(host, "22")
+				hostList[i] = host
+			}
+			conn, err := d.Dial("tcp", host)
+			if err == nil {
+				newHostList = append(newHostList, host)
+				conn.Close()
+			}
+		}
+		fmt.Println(len(newHostList), "hosts available out of", len(hostList), "loaded")
+		hostList = newHostList
+	}
+
+	shortList = shorten(hostList)
+
 	//fmt.Printf("%#v\n", hostList)
 	if len(hostList) == 0 {
 		return
 	}
 
 	// Prompt for credentials (for login and sudo)
+	var err error
 	username, pass, err = credentials()
 	if err != nil {
 		log.Fatal(err)
@@ -120,10 +142,12 @@ func main() {
 		swg         = sizedwaitgroup.New(*parallel)
 	)
 
-	for _, host := range hostList {
+	for iHost, host := range hostList {
 		swg.Add()
-		go func(host string) {
-			fmt.Println(host, "-- Connecting")
+		go func(host string, iHost int) {
+			fmt.Println(ansi.String([]*ansi.StyledText{&ansi.StyledText{
+				Label: host + " -- Connecting", Style: ansi.Underlined, FgCol: getColour(iHost),
+			}}))
 			// Attempt connection into the first host
 			client, err := ssh.Dial("tcp", host, config)
 			if !checkPassed {
@@ -138,13 +162,13 @@ func main() {
 			defer client.Close()
 
 			// Attempt initial send to one client
-			err = sendScript(strings.TrimSuffix(host, ":22"), client, sshAgent)
+			err = sendScript(strings.TrimSuffix(shortList[iHost], ":22"), client, sshAgent, iHost)
 			if err != nil {
 				log.Println(host, err)
 				return
 			}
 			swg.Done()
-		}(host)
+		}(host, iHost)
 
 		// Wait for the first connection to succeed before continuing to the rest of the hosts
 		if !checkPassed {
@@ -158,12 +182,12 @@ func main() {
 }
 
 // Send the script over the ssh connection
-func sendScript(host string, client *ssh.Client, sshAgent *agent.ExtendedAgent) error {
+func sendScript(host string, client *ssh.Client, sshAgent *agent.ExtendedAgent, iHost int) error {
 	tempFull, tempShort := TempFileName("psudo-", ".sh")
 	/*
 	 * SSH session for transferring the script
 	 */
-	{
+	if *script != "" {
 		session, err := client.NewSession()
 		if err != nil {
 			return err
@@ -203,6 +227,12 @@ func sendScript(host string, client *ssh.Client, sshAgent *agent.ExtendedAgent) 
 			log.Println(host, "Error writing file remotely:", err)
 			return err
 		}
+		if *debug {
+			fmt.Println(ansi.String([]*ansi.StyledText{
+				&ansi.StyledText{Label: host + " <", FgCol: getColour(iHost)},
+				&ansi.StyledText{Label: " Uploaded file to " + tempFull},
+			}))
+		}
 	}
 
 	/*
@@ -225,7 +255,7 @@ func sendScript(host string, client *ssh.Client, sshAgent *agent.ExtendedAgent) 
 			ssh.TTY_OP_ISPEED: 14400, // input speed = 14.4kbaud
 			ssh.TTY_OP_OSPEED: 14400, // output speed = 14.4kbaud
 		}
-		if err := session.RequestPty("xterm", term_width-len(host)-3, term_height, modes); err != nil {
+		if err := session.RequestPty("xterm", 1, term_width-len(host)-2, modes); err != nil {
 			log.Println(host, "Request for pseudo terminal failed: %s", err)
 			return err
 		}
@@ -237,24 +267,13 @@ func sendScript(host string, client *ssh.Client, sshAgent *agent.ExtendedAgent) 
 		stdin, _ := session.StdinPipe()
 		stdout, _ := session.StdoutPipe()
 		//stderr, _ := session.StderrPipe() // never used, so maybe setup a fifo?
-		if *debug {
-			session.Start("/usr/bin/bash -c $'PS4=\\'#${LINENO} \\w$ \\' /usr/bin/bash -ex " + tempFull + "'")
-		} else {
-			session.Start("/usr/bin/bash -e " + tempFull)
-		}
 
 		// Read the input from the reader and print it to the screen
-		handler := func(input io.Reader, fd int, c chan bool) {
+		handler := func(input io.Reader, fd int, c chan bool, iHost int) {
 			buff := new(bytes.Buffer)
 			rdr := make([]byte, 32<<10)
 			var curStyle = new(ansi.StyledText)
 			var doChomp bool
-			var hostStyle ansi.TextStyle
-			if fd == 1 {
-				hostStyle = ansi.Faint
-			} else {
-				hostStyle = ansi.Bold
-			}
 			for n, err := input.Read(rdr); n > 0 || err == nil; n, err = input.Read(rdr) {
 				//fmt.Printf("read"+num+" %s\n", string(rdr[:n]))
 				buff.Write(rdr[:n])
@@ -267,7 +286,10 @@ func sendScript(host string, client *ssh.Client, sshAgent *agent.ExtendedAgent) 
 					if passwordRegex.Match([]byte(str)) {
 						fmt.Fprintf(stdin, "%s\n", pass)
 						if *debug {
-							fmt.Println(host, "< sent password to sudo prompt---")
+							fmt.Println(ansi.String([]*ansi.StyledText{
+								&ansi.StyledText{Label: host, FgCol: getColour(iHost)},
+								&ansi.StyledText{Label: " < sent password to sudo prompt---"},
+							}))
 						}
 						doChomp = true
 						str = ""
@@ -277,11 +299,14 @@ func sendScript(host string, client *ssh.Client, sshAgent *agent.ExtendedAgent) 
 						styledText, _ := ansi.Parse(
 							strings.TrimSuffix(ansi.String([]*ansi.StyledText{curStyle}), "\033[0m")+str,
 							ansi.WithIgnoreInvalidCodes())
+						styledText = chopCarriageReturn(styledText)
 						if len(styledText) > 0 {
 							fmt.Printf("%s", ansi.String(append(
 								[]*ansi.StyledText{
-									&ansi.StyledText{Label: host + " ", Style: hostStyle}},
-								styledText...)))
+									&ansi.StyledText{Label: host + " |", FgCol: getColour(iHost)},
+									//				&ansi.StyledText{Label: " |"},
+								},
+								chopCarriageReturn(styledText)...)))
 
 							// Save current style
 							curStyle = styledText[len(styledText)-1]
@@ -299,8 +324,27 @@ func sendScript(host string, client *ssh.Client, sshAgent *agent.ExtendedAgent) 
 
 		a := make(chan bool)
 		//a, b := make(chan bool), make(chan bool)
-		go handler(stdout, 1, a)
+		go handler(stdout, 1, a, iHost)
 		//go handler(stderr, 2, b)
+
+		var cmdLine string
+		if *command != "" {
+			if *debug {
+				fmt.Println(ansi.String([]*ansi.StyledText{
+					&ansi.StyledText{Label: host + " > ", FgCol: getColour(iHost)},
+					&ansi.StyledText{Label: *command}}))
+			}
+			cmdLine = *command + ";"
+		}
+		if *script != "" {
+			if *debug {
+				cmdLine += "/bin/bash -c $'PS4=\\'#${LINENO} \\w> \\' /bin/bash -x " + tempFull + "'"
+			} else {
+				cmdLine += "/bin/bash " + tempFull
+			}
+		}
+
+		session.Start(cmdLine)
 		session.Wait()
 		<-a
 		//<-b
@@ -309,13 +353,13 @@ func sendScript(host string, client *ssh.Client, sshAgent *agent.ExtendedAgent) 
 	/*
 	 * SSH session for clean up after running the script
 	 */
-	{
+	if *script != "" {
 		session, err := client.NewSession()
 		if err != nil {
 			return err
 		}
 		defer session.Close()
-		session.Run("/usr/bin/rm " + tempFull)
+		session.Run("/usr/bin/rm " + tempFull + " || /bin/rm " + tempFull)
 	}
 	//fmt.Println("returning")
 	return nil
@@ -341,4 +385,35 @@ func TempFileName(prefix, suffix string) (full, short string) {
 	randBytes := make([]byte, 16)
 	rand.Read(randBytes)
 	return filepath.Join(os.TempDir(), prefix+hex.EncodeToString(randBytes)+suffix), prefix + hex.EncodeToString(randBytes) + suffix
+}
+
+func chopCarriageReturn(in []*ansi.StyledText) []*ansi.StyledText {
+	if len(in) == 0 {
+		return in
+	}
+	last := in[len(in)-1]
+	if strings.HasSuffix(last.Label, "\r\n") {
+		last.Label = strings.TrimSuffix(last.Label, "\r\n") + "\n"
+	}
+	for i := len(in) - 1; i >= 0; i-- {
+		if j := strings.LastIndexByte(in[i].Label, '\r'); j >= 0 {
+			//if l := len(in[i].Label); l-2 == j && in[i].Label[l-1] == '\n' {
+			//	return in
+			//}
+			//fmt.Printf("%q", in[i].Label, j)
+			in[i].Label = in[i].Label[j+1:]
+			if len(in[i].Label) == 0 {
+				//if i == len(in)-1 {
+				//	return nil
+				//}
+				return in[i+1:]
+			}
+			return in[i:]
+		}
+	}
+	return in
+}
+
+func getColour(i int) *ansi.Col {
+	return ansi.Cols[i%6+2]
 }
