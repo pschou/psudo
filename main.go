@@ -54,10 +54,14 @@ func main() {
 		_, exec := path.Split(os.Args[0])
 		fmt.Fprintln(os.Stderr, "Usage:\n  "+exec+" [flags] [args for script...]\nFlags:")
 		flag.PrintDefaults()
-		fmt.Fprintln(os.Stderr, `Examples:
+
+		fmt.Fprintln(os.Stderr, `Args for script:
+  file:filename.tmp - Upload a file into a temporary directory and give the path to the script
+  arg:-c            - Specify an argument to feed into the script
+Examples:
   `+exec+` -c "date"  # print the date (for checking that the clocks are matching)
-  `+exec+` -s "script.sh" -- file:out  # upload the file "out" and execute the script with this as an arg
-  `+exec+` -c tar -- -C /tmp -xvzf file:data.tgz  # extract the uploaded tar+gz file into /tmp`)
+  `+exec+` -s "script.sh" arg:-c file:out  # upload the file "out" and execute the script with args
+  `+exec+` -s "script.sh" -- -c file:out  # same but without the need for arg: prefix`)
 	}
 	flag.Parse()
 	if (*hostListFile == "" && *hostListString == "") || (*script == "" && *command == "") {
