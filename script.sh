@@ -17,7 +17,9 @@ cat<<'EOF'
 EOF
 echo -e "\e[mReset Colors"
 ls --color=auto -latr /var/
-sudo yum clean all
-sudo yum check-update
+#sudo yum clean all
+#sudo yum check-update
 echo yay
 
+echo args: "$@"
+md5sum $1

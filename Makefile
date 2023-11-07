@@ -4,4 +4,4 @@ FLAGS := "-s -w -X main.version=${VERSION}"
 
 build:
 	CGO_ENABLED=0 go build -ldflags=${FLAGS} -o psudo .
-	upx --lzma psudo 
+	#upx --lzma psudo 
