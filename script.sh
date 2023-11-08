@@ -22,4 +22,5 @@ ls --color=auto -latr /var/
 echo yay
 
 echo args: "$@"
-md5sum $1
+#md5sum $1
+exit 23

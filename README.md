@@ -5,15 +5,20 @@ This is a single use program to run a shell script remotely using a parallel she
 Usage:
 ```
 $ ./psudo
-Parallel Remote SUDO, Version (https://github.com/pschou/psudo)
+Missing host list
+Parallel Remote SUDO, Version  (https://github.com/pschou/psudo)
 Usage:
-  psudo [flags] [args for script...]
+  psudo [opts] -s script.sh [args for script...]
+  psudo [opts] -c "command string" [args...]
+  psudo [opts] command [args...]
 Flags:
   -A    Disable SSH agent forwarding
   -H string
         List of hosts defined in a quoted string "host1, host2"
   -c string
-        Command to execute remotely
+        If present, then commands are read from string.  Being that this is quoted, it allows globbing.
+        If there are arguments after the string, they are assigned to the positional parameters,
+        starting with $0.
   -d    Turn on script debugging
   -h string
         Read hosts from given host file
@@ -24,16 +29,24 @@ Flags:
   -pw string
         Send password for line matching (default "^\\[sudo\\] password for ")
   -s string
-        Script to execute remotely
+        If present, the script is uploaded and then executed remotely. If there are arguments after the
+        string, they are assigned to the positional parameters, starting with $1.
+  -sh string
+        BaSH path to use for executing the script (-s) or command (-c) flags (default "/bin/bash")
   -u string
         Use this user rather than the current user
-Args for script:
-  file:filename.tmp - Upload a file into a temporary directory and give the path to the script
-  arg:-c            - Specify an argument to feed into the script
+Arg Options:
+  file:f.tgz - Upload a file into a temporary file and pass as an arg.
+  arg:-c     - Specify an argument to feed into the script (default if not specified)
+  arg:file:t - Stacking is necessary if an arg must have the prefix "file:"
 Examples:
-  psudo -c "date"  # print the date (for checking that the clocks are matching)
-  psudo -s "script.sh" arg:-c file:out  # upload the file "out" and execute the script with args
-  psudo -s "script.sh" -- -c file:out  # same but without the need for arg: prefix
+  psudo -H host1,host2 date  # Print the date, ie: checking that the clocks are matching.
+  psudo -h hf -s script.sh -- -c              # Upload and run script.sh and pass a '-c' arg as $1.
+  psudo -h hf -s script.sh arg:-c file:out    # " and pass in an uploaded file path as second arg.
+  psudo -h hf tar -C /tmp -zvxf file:f.tgz    # Call a command with args.
+  psudo -h hf -c "echo hello; echo world"     # A string of commands.
+  psudo -h hf -c 'mv $0 /tmp/a && mv $1 /dev/shm/b && chmod 755 /dev/shm/b' file:aFile file:bFile
+    # Complex example sending two files into different locations and changing mode
 ```
 
 Example:

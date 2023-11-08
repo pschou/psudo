@@ -26,12 +26,18 @@ import (
 )
 
 var (
-	userSetting         = flag.String("u", "", "Use this user rather than the current user")
-	hostListFile        = flag.String("h", "", "Read hosts from given host file")
-	hostListString      = flag.String("H", "", "List of hosts defined in a quoted string \"host1, host2\"")
-	script              = flag.String("s", "", "Script to execute remotely")
-	command             = flag.String("c", "", "Command to execute remotely")
+	userSetting    = flag.String("u", "", "Use this user rather than the current user")
+	hostListFile   = flag.String("h", "", "Read hosts from given host file")
+	hostListString = flag.String("H", "", "List of hosts defined in a quoted string \"host1, host2\"")
+	script         = flag.String("s", "", "If present, the script is uploaded and then executed remotely. If there are arguments after the\n"+
+		"string, they are assigned to the positional parameters, starting with $1.")
+	command = flag.String("c", "", "If present, then commands are read from string.  Being that this is quoted, it allows globbing.\n"+
+		"If there are arguments after the string, they are assigned to the positional parameters,\n"+
+		"starting with $0.")
+	//	Command to execute remotely, a string sent to be executed.\n"+
+	//		"Useful when one wants to pass a binary or one or more commands with ';' in a single quoted string.")
 	parallel            = flag.Int("p", 4, "Maximum concurrent connections allowed")
+	shell               = flag.String("sh", "/bin/bash", "BaSH path to use for executing the script (-s) or command (-c) flags")
 	identity            = flag.String("i", "", "SSH identity file for login, the private key for single use")
 	disableAgent        = flag.Bool("A", false, "Disable SSH agent forwarding")
 	debug               = flag.Bool("d", false, "Turn on script debugging")
@@ -46,27 +52,41 @@ var (
 	exitCodes  []int
 	lineCounts []int
 	hostErrors []string
+	//globLock   sync.Mutex
 )
 
 func main() {
 	flag.Usage = func() {
 		fmt.Fprintln(os.Stderr, "Parallel Remote SUDO, Version", version, "(https://github.com/pschou/psudo)")
 		_, exec := path.Split(os.Args[0])
-		fmt.Fprintln(os.Stderr, "Usage:\n  "+exec+" [flags] [args for script...]\nFlags:")
+		fmt.Fprintln(os.Stderr, "Usage:\n  "+exec+" [opts] -s script.sh [args for script...]\n  "+
+			exec+" [opts] -c \"command string\" [args...]\n  "+
+			exec+" [opts] command [args...]\nFlags:")
 		flag.PrintDefaults()
 
-		fmt.Fprintln(os.Stderr, `Args for script:
-  file:filename.tmp - Upload a file into a temporary directory and give the path to the script
-  arg:-c            - Specify an argument to feed into the script
-Examples:
-  `+exec+` -c "date"  # print the date (for checking that the clocks are matching)
-  `+exec+` -s "script.sh" arg:-c file:out  # upload the file "out" and execute the script with args
-  `+exec+` -s "script.sh" -- -c file:out  # same but without the need for arg: prefix`)
+		fmt.Fprintln(os.Stderr, `Arg Options:
+  file:f.tgz - Upload a file into a temporary file and pass as an arg.
+  arg:-c     - Specify an argument to feed into the script (default if not specified)
+  arg:file:t - Stacking is necessary if an arg must have the prefix "file:"
+Examples:`+"\n  "+
+			exec+" -H host1,host2 date  # Print the date, ie: checking that the clocks are matching.\n  "+
+			exec+" -h hf -s script.sh -- -c              # Upload and run script.sh and pass a '-c' arg as $1.\n  "+
+			exec+" -h hf -s script.sh arg:-c file:out    # \" and pass in an uploaded file path as second arg.\n  "+
+			exec+" -h hf tar -C /tmp -zvxf file:f.tgz    # Call a command with args.\n  "+
+			exec+" -h hf -c \"echo hello; echo world\"     # A string of commands.\n  "+
+			exec+" -h hf -c 'mv $0 /tmp/a && mv $1 /dev/shm/b && chmod 755 /dev/shm/b' file:aFile file:bFile\n    "+
+			"# Complex example sending two files into different locations and changing mode")
 	}
 	flag.Parse()
-	if (*hostListFile == "" && *hostListString == "") || (*script == "" && *command == "") {
-		flag.Usage()
-		os.Exit(1)
+
+	if *hostListFile == "" && *hostListString == "" {
+		failUsage("Missing host list")
+	}
+	if *script == "" && len(flag.Args()) == 0 && *command == "" {
+		failUsage("Missing command to execute")
+	}
+	if *script != "" && *command != "" {
+		failUsage("Must have specify a script or command, not both.")
 	}
 	passwordRegex = regexp.MustCompile(*passwordMatch)
 
@@ -237,6 +257,12 @@ Examples:
 	}
 }
 
+func failUsage(msg string) {
+	fmt.Fprintln(os.Stderr, msg)
+	flag.Usage()
+	os.Exit(1)
+}
+
 // Send the script over the ssh connection
 func execute(host string, client *ssh.Client, sshAgent *agent.ExtendedAgent, iHost int) error {
 	hostColor, hostStyle := getColour(iHost)
@@ -258,7 +284,8 @@ func execute(host string, client *ssh.Client, sshAgent *agent.ExtendedAgent, iHo
 
 	var scriptArgs string
 	{
-		args := append([]string{}, flag.Args()...)
+		var args []string
+		args = append(args, flag.Args()...)
 		for i, s := range args {
 			lower := strings.ToLower(s)
 			switch {
@@ -421,20 +448,23 @@ func execute(host string, client *ssh.Client, sshAgent *agent.ExtendedAgent, iHo
 		//go handler(stderr, 2, b)
 
 		var cmdLine string
-		if *command != "" {
-			if *debug {
-				fmt.Println(ansi.String([]*ansi.StyledText{
-					&ansi.StyledText{Label: host + " > ", FgCol: hostColor, Style: hostStyle},
-					&ansi.StyledText{Label: *command}}))
-			}
-			cmdLine = *command + ";"
-		}
-		if *script != "" {
-			if *debug {
-				cmdLine += "PS4='#${LINENO} \\w> ' /bin/bash -x " + tempFull + " " + scriptArgs
+		if *script == "" {
+			if *command != "" {
+				cmdLine = *shell + " -c " + shellescape.Quote(*command) + " " + scriptArgs
 			} else {
-				cmdLine += "/bin/bash " + tempFull + " " + scriptArgs
+				cmdLine = scriptArgs
 			}
+		} else {
+			if *debug {
+				cmdLine = "PS4='#${LINENO} \\w> ' " + *shell + " -x " + tempFull + " " + scriptArgs
+			} else {
+				cmdLine = *shell + " " + tempFull + " " + scriptArgs
+			}
+		}
+		if *debug {
+			fmt.Println(ansi.String([]*ansi.StyledText{
+				&ansi.StyledText{Label: host + " > ", FgCol: hostColor, Style: hostStyle},
+				&ansi.StyledText{Label: cmdLine}}))
 		}
 
 		session.Start(cmdLine)
