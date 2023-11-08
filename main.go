@@ -325,10 +325,11 @@ Examples:`+"\n  "+
 				err = session.Wait()
 				<-closed
 				if err != nil {
-					fmt.Fprintln(os.Stderr, " ", host, " sudo failed--", err)
 					if passwordLocked {
 						passwordFail = true
+						os.Exit(1)
 					}
+					fmt.Fprintln(os.Stderr, " ", host, " sudo failed--", err)
 				} else if tries < 2 {
 					sudoCount++
 					newHostList = append(newHostList, host)
