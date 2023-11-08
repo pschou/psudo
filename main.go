@@ -38,6 +38,7 @@ var (
 	shell               = flag.String("sh", "/bin/bash", "BaSH path to use for executing the script (-s) or command (-c) flags")
 	identity            = flag.String("i", "", "SSH identity file for login, the private key for single use")
 	disableAgent        = flag.Bool("A", false, "Disable SSH agent forwarding")
+	disablePrecheck     = flag.Bool("f", false, "Force mode, disable prechecks and if login attempts are limited this may lock you out.")
 	debug               = flag.Bool("d", false, "Turn on script debugging")
 	passwordMatch       = flag.String("pw", `^\[sudo\] password for `, "Send password for line matching")
 	timeout             = flag.Duration("w", 3*time.Second, "Timeout when probing for TCP listening port")
@@ -119,6 +120,7 @@ Examples:`+"\n  "+
 	}
 
 	hostList = dedup(hostList)
+	originalHostCount := len(hostList)
 	{ // Loop over hosts to verify that the TCP port is connectable
 		var newHostList []string
 		d := net.Dialer{Timeout: *timeout}
@@ -192,17 +194,113 @@ Examples:`+"\n  "+
 	}
 
 	// Test logging in and SUDO'ing to each host
-	var connectCount, sudoCount int
-	for iHost, host := range hostList {
-		client, err := ssh.Dial("tcp", host, config)
-		if err != nil {
-			continue
-		}
-		connectCount++
+	if !*disablePrecheck {
+		var connectCount, sudoCount int
+		for iHost, host := range hostList {
+			hostColor, hostStyle := getColour(iHost)
+			err := func() error {
+				client, err := ssh.Dial("tcp", host, config)
+				if err != nil {
+					return err
+				}
+				defer client.Close()
 
-		client.Close()
+				session, err := client.NewSession()
+				if err != nil {
+					return err
+				}
+				connectCount++
+				defer session.Close()
+				if sshAgent != nil {
+					agent.ForwardToAgent(client, *sshAgent)
+					agent.RequestAgentForwarding(session)
+				}
+
+				modes := ssh.TerminalModes{
+					ssh.ECHO:          0,     // Disable echoing
+					ssh.IGNCR:         1,     // Ignore CR on input.
+					ssh.TTY_OP_ISPEED: 14400, // input speed = 14.4kbaud
+					ssh.TTY_OP_OSPEED: 14400, // output speed = 14.4kbaud
+				}
+				if err := session.RequestPty("xterm", 1, term_width-len(host)-2, modes); err != nil {
+					log.Println(host, "Request for pseudo terminal failed: %s", err)
+					return err
+				}
+
+				stdin, _ := session.StdinPipe()
+				stdout, _ := session.StdoutPipe()
+
+				var (
+					channelOpen = true
+					closed      = make(chan bool)
+					tries       int
+				)
+				// Read the input from the reader and print it to the screen
+				go func() {
+					buff := new(bytes.Buffer)
+					rdr := make([]byte, 32<<10)
+					var doChomp bool
+					for n, err := stdout.Read(rdr); channelOpen && (n > 0 || err == nil); n, err = stdout.Read(rdr) {
+						//fmt.Printf("read"+num+" %s\n", string(rdr[:n]))
+						buff.Write(rdr[:n])
+						for {
+							str, err := buff.ReadString('\n')
+							if doChomp && strings.TrimSpace(str) == "" {
+								doChomp = false
+								continue
+							}
+							if passwordRegex.Match([]byte(str)) {
+								tries++
+								if tries > 1 {
+									stdin.Close()
+									return
+								}
+								fmt.Fprintf(stdin, "%s\n", pass)
+								if *debug {
+									fmt.Println(ansi.String([]*ansi.StyledText{
+										&ansi.StyledText{Label: host, FgCol: hostColor, Style: hostStyle},
+										&ansi.StyledText{Label: " < sent password to sudo prompt---"},
+									}))
+								}
+								doChomp = true
+								str = ""
+							}
+							if err != nil {
+								// This may be a partial line, put it back in the buffer and break the loop
+								buff.Write([]byte(str))
+								break
+							}
+						}
+					}
+					closed <- true
+				}()
+				session.Start("/usr/bin/true")
+				err = session.Wait()
+				<-closed
+				if err != nil {
+					return err
+				} else if tries < 2 {
+					sudoCount++
+				}
+				return nil
+			}()
+			if err != nil {
+				fmt.Println(" ", host, " err:", err)
+				os.Exit(1)
+			}
+		}
+
+		if originalHostCount > sudoCount {
+			fmt.Println("Warning: Login was successful on", connectCount, "hosts and sudo on", sudoCount, "hosts")
+			if !askForConfirmation("Continue? ") {
+				os.Exit(1)
+			}
+		}
 	}
 
+	/*
+	 *  Main worker loop, goes over each host and sends out commands
+	 */
 	var (
 		checkPassed bool
 		checkVerify = make(chan bool)

@@ -5,7 +5,7 @@ This is a single use program to run a shell script remotely using a parallel she
 Usage:
 ```
 $ ./psudo -help
-Parallel Remote SUDO, Version  (https://github.com/pschou/psudo)
+Parallel Remote SUDO, Version 0.1.x (https://github.com/pschou/psudo)
 Usage:
   psudo [opts] -s script.sh [args for script...]
   psudo [opts] -c "command string" [args...]
@@ -19,6 +19,7 @@ Flags:
         If there are arguments after the string, they are assigned to the positional parameters,
         starting with $0.
   -d    Turn on script debugging
+  -f    Force mode, disable prechecks and if login attempts are limited this may lock you out.
   -h string
         Read hosts from given host file
   -i string
@@ -33,7 +34,9 @@ Flags:
   -sh string
         BaSH path to use for executing the script (-s) or command (-c) flags (default "/bin/bash")
   -u string
-        Use this user rather than the current user
+        Use this user rather than the current user for ssh connect
+  -w duration
+        Timeout when probing for TCP listening port (default 3s)
 Arg Options:
   file:f.tgz - Upload a file into a temporary file and pass as an arg.
   arg:-c     - Specify an argument to feed into the script (default if not specified)
