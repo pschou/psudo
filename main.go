@@ -40,7 +40,7 @@ var (
 	disableAgent        = flag.Bool("A", false, "Disable SSH agent forwarding")
 	disablePrecheck     = flag.Bool("f", false, "Force mode, disable prechecks and if login attempts are limited this may lock you out.")
 	batchMode           = flag.Bool("b", false, "Batch mode, disable prompt after prechecks are done if everything passes")
-	batchBatchMode      = flag.Bool("bb", false, "Same as batch mode and continue with only passing hosts")
+	batchBatchMode      = flag.Bool("bb", false, "Same as batch mode but continue with only passing hosts")
 	debug               = flag.Bool("d", false, "Turn on script debugging")
 	passwordMatch       = flag.String("pw", `^\[sudo\] password for `, "Send password for line matching")
 	timeout             = flag.Duration("w", 3*time.Second, "Timeout when probing for TCP listening port")

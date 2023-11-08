@@ -5,7 +5,7 @@ This is a single use program to run a shell script remotely using a parallel she
 Usage:
 ```
 $ ./psudo -help
-Parallel Remote SUDO, Version 0.1.x (https://github.com/pschou/psudo)
+Parallel Remote SUDO, Version 0.1.20231108.0907 (https://github.com/pschou/psudo)
 Usage:
   psudo [opts] -s script.sh [args for script...]
   psudo [opts] -c "command string" [args...]
@@ -14,6 +14,9 @@ Flags:
   -A    Disable SSH agent forwarding
   -H string
         List of hosts defined in a quoted string "host1, host2"
+  -b    Batch mode, disable prompt after prechecks are done if everything passes
+  -bb
+        Same as batch mode but continue with only passing hosts
   -c string
         If present, then commands are read from string.  Being that this is quoted, it allows globbing.
         If there are arguments after the string, they are assigned to the positional parameters,
