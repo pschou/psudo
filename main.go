@@ -39,6 +39,8 @@ var (
 	identity            = flag.String("i", "", "SSH identity file for login, the private key for single use")
 	disableAgent        = flag.Bool("A", false, "Disable SSH agent forwarding")
 	disablePrecheck     = flag.Bool("f", false, "Force mode, disable prechecks and if login attempts are limited this may lock you out.")
+	batchMode           = flag.Bool("b", false, "Batch mode, disable prompt after prechecks are done if everything passes")
+	batchBatchMode      = flag.Bool("bb", false, "Same as batch mode and continue with only passing hosts")
 	debug               = flag.Bool("d", false, "Turn on script debugging")
 	passwordMatch       = flag.String("pw", `^\[sudo\] password for `, "Send password for line matching")
 	timeout             = flag.Duration("w", 3*time.Second, "Timeout when probing for TCP listening port")
@@ -133,17 +135,16 @@ Examples:`+"\n  "+
 			if err == nil {
 				newHostList = append(newHostList, host)
 				conn.Close()
+				if *debug {
+					fmt.Println(" ", host, " port open")
+				}
+			} else {
+				fmt.Println(" ", host, " no reply")
 			}
 		}
 		fmt.Println(len(newHostList), "hosts available out of", len(hostList), "loaded")
 		hostList = newHostList
 	}
-
-	shortList := shorten(hostList)
-	durations = make([]time.Duration, len(shortList))
-	exitCodes = make([]int, len(shortList))
-	lineCounts = make([]int, len(shortList))
-	hostErrors = make([]string, len(shortList))
 
 	//fmt.Printf("%#v\n", hostList)
 	if len(hostList) == 0 {
@@ -195,21 +196,30 @@ Examples:`+"\n  "+
 
 	// Test logging in and SUDO'ing to each host
 	if !*disablePrecheck {
+		var newHostList []string
 		var connectCount, sudoCount int
 		for iHost, host := range hostList {
 			hostColor, hostStyle := getColour(iHost)
 			err := func() error {
 				client, err := ssh.Dial("tcp", host, config)
 				if err != nil {
+					fmt.Println(" ", host, " connect failed--", err)
 					return err
+				}
+				if *debug {
+					fmt.Println(" ", host, " connected")
 				}
 				defer client.Close()
 
 				session, err := client.NewSession()
 				if err != nil {
+					fmt.Println(" ", host, " session failed--", err)
 					return err
 				}
 				connectCount++
+				if *debug {
+					fmt.Println(" ", host, " session created")
+				}
 				defer session.Close()
 				if sshAgent != nil {
 					agent.ForwardToAgent(client, *sshAgent)
@@ -278,9 +288,13 @@ Examples:`+"\n  "+
 				err = session.Wait()
 				<-closed
 				if err != nil {
-					return err
+					fmt.Println(" ", host, " sudo failed--", err)
 				} else if tries < 2 {
 					sudoCount++
+					newHostList = append(newHostList, host)
+					if *debug {
+						fmt.Println(" ", host, " sudo succeeded")
+					}
 				}
 				return nil
 			}()
@@ -290,13 +304,22 @@ Examples:`+"\n  "+
 			}
 		}
 
-		if originalHostCount > sudoCount {
-			fmt.Println("Warning: Login was successful on", connectCount, "hosts and sudo on", sudoCount, "hosts")
-			if !askForConfirmation("Continue? ") {
-				os.Exit(1)
+		fmt.Println("Login was successful on", connectCount, "hosts and sudo on", sudoCount, "hosts")
+		if !*batchBatchMode {
+			if !*batchMode || originalHostCount > sudoCount {
+				if !confirm("Continue? ") {
+					os.Exit(1)
+				}
 			}
 		}
+		hostList = newHostList
 	}
+
+	shortList := shorten(hostList)
+	durations = make([]time.Duration, len(shortList))
+	exitCodes = make([]int, len(shortList))
+	lineCounts = make([]int, len(shortList))
+	hostErrors = make([]string, len(shortList))
 
 	/*
 	 *  Main worker loop, goes over each host and sends out commands

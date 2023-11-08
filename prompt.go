@@ -8,7 +8,7 @@ import (
 	"strings"
 )
 
-func cnfirm(s string) bool {
+func confirm(s string) bool {
 	reader := bufio.NewReader(os.Stdin)
 
 	for {
