@@ -136,13 +136,13 @@ Examples:`+"\n  "+
 				newHostList = append(newHostList, host)
 				conn.Close()
 				if *debug {
-					fmt.Println(" ", host, " port open")
+					fmt.Fprintln(os.Stderr, " ", host, " port open")
 				}
 			} else {
-				fmt.Println(" ", host, " no reply")
+				fmt.Fprintln(os.Stderr, " ", host, " no reply")
 			}
 		}
-		fmt.Println(len(newHostList), "hosts available out of", len(hostList), "loaded")
+		fmt.Fprintln(os.Stderr, len(newHostList), "hosts available out of", len(hostList), "loaded")
 		hostList = newHostList
 	}
 
@@ -198,27 +198,26 @@ Examples:`+"\n  "+
 	if !*disablePrecheck {
 		var newHostList []string
 		var connectCount, sudoCount int
-		for iHost, host := range hostList {
-			hostColor, hostStyle := getColour(iHost)
+		for _, host := range hostList {
 			err := func() error {
 				client, err := ssh.Dial("tcp", host, config)
 				if err != nil {
-					fmt.Println(" ", host, " connect failed--", err)
+					fmt.Fprintln(os.Stderr, " ", host, " connect failed--", err)
 					return err
 				}
 				if *debug {
-					fmt.Println(" ", host, " connected")
+					fmt.Fprintln(os.Stderr, " ", host, " connected")
 				}
 				defer client.Close()
 
 				session, err := client.NewSession()
 				if err != nil {
-					fmt.Println(" ", host, " session failed--", err)
+					fmt.Fprintln(os.Stderr, " ", host, " session failed--", err)
 					return err
 				}
 				connectCount++
 				if *debug {
-					fmt.Println(" ", host, " session created")
+					fmt.Fprintln(os.Stderr, " ", host, " session created")
 				}
 				defer session.Close()
 				if sshAgent != nil {
@@ -233,7 +232,6 @@ Examples:`+"\n  "+
 					ssh.TTY_OP_OSPEED: 14400, // output speed = 14.4kbaud
 				}
 				if err := session.RequestPty("xterm", 1, term_width-len(host)-2, modes); err != nil {
-					log.Println(host, "Request for pseudo terminal failed: %s", err)
 					return err
 				}
 
@@ -267,10 +265,7 @@ Examples:`+"\n  "+
 								}
 								fmt.Fprintf(stdin, "%s\n", pass)
 								if *debug {
-									fmt.Println(ansi.String([]*ansi.StyledText{
-										&ansi.StyledText{Label: host, FgCol: hostColor, Style: hostStyle},
-										&ansi.StyledText{Label: " < sent password to sudo prompt---"},
-									}))
+									fmt.Fprintln(os.Stderr, " ", host, " sent password to sudo prompt")
 								}
 								doChomp = true
 								str = ""
@@ -288,23 +283,23 @@ Examples:`+"\n  "+
 				err = session.Wait()
 				<-closed
 				if err != nil {
-					fmt.Println(" ", host, " sudo failed--", err)
+					fmt.Fprintln(os.Stderr, " ", host, " sudo failed--", err)
 				} else if tries < 2 {
 					sudoCount++
 					newHostList = append(newHostList, host)
 					if *debug {
-						fmt.Println(" ", host, " sudo succeeded")
+						fmt.Fprintln(os.Stderr, " ", host, " sudo succeeded")
 					}
 				}
 				return nil
 			}()
 			if err != nil {
-				fmt.Println(" ", host, " err:", err)
+				fmt.Fprintln(os.Stderr, " ", host, " err:", err)
 				os.Exit(1)
 			}
 		}
 
-		fmt.Println("Login was successful on", connectCount, "hosts and sudo on", sudoCount, "hosts")
+		fmt.Fprintln(os.Stderr, "Login was successful on", connectCount, "hosts and sudo on", sudoCount, "hosts")
 		if !*batchBatchMode {
 			if !*batchMode || originalHostCount > sudoCount {
 				if !confirm("Continue? ") {
