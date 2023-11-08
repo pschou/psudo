@@ -4,8 +4,7 @@ This is a single use program to run a shell script remotely using a parallel she
 
 Usage:
 ```
-$ ./psudo
-Missing host list
+$ ./psudo -help
 Parallel Remote SUDO, Version  (https://github.com/pschou/psudo)
 Usage:
   psudo [opts] -s script.sh [args for script...]
