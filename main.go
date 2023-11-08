@@ -36,13 +36,13 @@ var (
 	command = flag.String("c", "", "If present, then commands are read from string.  Being that this is quoted, it allows globbing.\n"+
 		"If there are arguments after the string, they are assigned to the positional parameters,\n"+
 		"starting with $0.")
-	parallel            = flag.Int("p", 4, "Maximum concurrent connections allowed")
-	shell               = flag.String("sh", "/bin/bash", "BaSH path to use for executing the script (-s) or command (-c) flags")
-	identity            = flag.String("i", "", "SSH identity file for login, the private key for single use")
-	disableAgent        = flag.Bool("A", false, "Disable SSH agent forwarding")
-	disablePrecheck     = flag.Bool("f", false, "Force mode, disable prechecks and if login attempts are limited this may lock you out.")
-	batchMode           = flag.Bool("b", false, "Batch mode, disable prompt after prechecks are done if everything passes")
-	batchBatchMode      = flag.Bool("bb", false, "Same as batch mode but continue with only passing hosts")
+	parallel        = flag.Int("p", 4, "Maximum concurrent connections allowed")
+	shell           = flag.String("sh", "/bin/bash", "BaSH path to use for executing the script (-s) or command (-c) flags")
+	identity        = flag.String("i", "", "SSH identity file for login, the private key for single use")
+	disableAgent    = flag.Bool("A", false, "Disable SSH agent forwarding")
+	disablePrecheck = flag.Bool("f", false, "Force mode, disable prechecks and if login attempts are limited this may lock you out.")
+	batchMode       = flag.Bool("b", false, "Batch mode, disable prompt after prechecks are done if everything passes")
+	//batchBatchMode      = flag.Bool("bb", false, "Same as batch mode but continue with only passing hosts")
 	debug               = flag.Bool("d", false, "Turn on script debugging")
 	passwordMatch       = flag.String("pw", `^\[sudo\] password for `, "Send password for line matching")
 	timeout             = flag.Duration("w", 3*time.Second, "Timeout when probing for TCP listening port")
@@ -351,13 +351,13 @@ Examples:`+"\n  "+
 		swg.Wait()
 
 		fmt.Fprintln(os.Stderr, "Login was successful on", connectCount, "hosts and sudo on", sudoCount, "hosts")
-		if !*batchBatchMode {
-			if !*batchMode || originalHostCount > sudoCount {
-				if !confirm("Continue? ") {
-					os.Exit(1)
-				}
+		//	if !*batchBatchMode {
+		if !*batchMode || originalHostCount > sudoCount {
+			if !confirm("Continue? ") {
+				os.Exit(1)
 			}
 		}
+		//}
 		hostList = newHostList
 	}
 
