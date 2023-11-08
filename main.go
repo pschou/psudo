@@ -5,6 +5,7 @@ import (
 	"context"
 	"crypto/rand"
 	"encoding/hex"
+	"errors"
 	"flag"
 	"fmt"
 	"io"
@@ -15,6 +16,7 @@ import (
 	"path/filepath"
 	"regexp"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/alessio/shellescape"
@@ -162,7 +164,7 @@ Examples:`+"\n  "+
 	config := &ssh.ClientConfig{
 		User: username,
 		Auth: []ssh.AuthMethod{
-			ssh.Password(pass),
+			//ssh.Password(pass),
 			//ssh.KeyboardInteractive(SshInteractive),
 		},
 		HostKeyCallback: ssh.InsecureIgnoreHostKey(),
@@ -193,14 +195,51 @@ Examples:`+"\n  "+
 		}
 		config.Auth = append([]ssh.AuthMethod{ssh.PublicKeys(key)}, config.Auth...)
 	}
+	AuthMethods := append(config.Auth, ssh.Password(pass))
 
 	// Test logging in and SUDO'ing to each host
 	if !*disablePrecheck {
-		var newHostList []string
-		var connectCount, sudoCount int
+		var (
+			passwordLock            sync.Mutex
+			passwordLocked          bool
+			passwordFail            bool
+			newHostList             []string
+			connectCount, sudoCount int
+			swg                     = sizedwaitgroup.New(*parallel)
+		)
 		for _, host := range hostList {
-			err := func() error {
-				client, err := ssh.Dial("tcp", host, config)
+			swg.Add()
+			go func(host string) error {
+				defer swg.Done()
+				if passwordFail {
+					return errors.New("skipped checks")
+				}
+
+				// Call back so we can get a count of the number of password tries
+				passwordCount := 0
+				passwordCallBack := func() (secret string, err error) {
+					passwordLock.Lock()
+					passwordLocked = true
+					passwordCount++
+					if passwordCount > 1 || passwordFail {
+						passwordFail = true
+						log.Fatal("SSH Login incorrect password")
+					}
+					return pass, nil
+				}
+
+				// Setup the test config to send with the connection
+				testConfig := &ssh.ClientConfig{
+					User:            username,
+					Auth:            append(config.Auth, ssh.PasswordCallback(passwordCallBack)),
+					HostKeyCallback: ssh.InsecureIgnoreHostKey(),
+				}
+				client, err := ssh.Dial("tcp", host, testConfig)
+				passwordFail = passwordFail || err != nil
+				if passwordLocked {
+					passwordLocked = false
+					passwordLock.Unlock()
+				}
 				if err != nil {
 					fmt.Fprintln(os.Stderr, " ", host, " connect failed--", err)
 					return err
@@ -258,11 +297,14 @@ Examples:`+"\n  "+
 								continue
 							}
 							if passwordRegex.Match([]byte(str)) {
-								tries++
 								if tries > 1 {
-									stdin.Close()
-									return
+									log.Fatal("SUDO incorrect password")
+									//stdin.Close()
+									//return
 								}
+								passwordLock.Lock()
+								passwordLocked = true
+								tries++
 								fmt.Fprintf(stdin, "%s\n", pass)
 								if *debug {
 									fmt.Fprintln(os.Stderr, " ", host, " sent password to sudo prompt")
@@ -284,6 +326,9 @@ Examples:`+"\n  "+
 				<-closed
 				if err != nil {
 					fmt.Fprintln(os.Stderr, " ", host, " sudo failed--", err)
+					if passwordLocked {
+						passwordFail = true
+					}
 				} else if tries < 2 {
 					sudoCount++
 					newHostList = append(newHostList, host)
@@ -291,13 +336,18 @@ Examples:`+"\n  "+
 						fmt.Fprintln(os.Stderr, " ", host, " sudo succeeded")
 					}
 				}
+				if passwordLocked {
+					passwordLocked = false
+					passwordLock.Unlock()
+				}
 				return nil
-			}()
-			if err != nil {
+			}(host)
+			/*if err != nil {
 				fmt.Fprintln(os.Stderr, " ", host, " err:", err)
 				os.Exit(1)
-			}
+			}*/
 		}
+		swg.Wait()
 
 		fmt.Fprintln(os.Stderr, "Login was successful on", connectCount, "hosts and sudo on", sudoCount, "hosts")
 		if !*batchBatchMode {
@@ -315,6 +365,7 @@ Examples:`+"\n  "+
 	exitCodes = make([]int, len(shortList))
 	lineCounts = make([]int, len(shortList))
 	hostErrors = make([]string, len(shortList))
+	config.Auth = AuthMethods
 
 	/*
 	 *  Main worker loop, goes over each host and sends out commands
@@ -329,6 +380,7 @@ Examples:`+"\n  "+
 		hostColor, hostStyle := getColour(iHost)
 		swg.Add()
 		go func(host string, iHost int) {
+			defer swg.Done()
 			fmt.Println(ansi.String([]*ansi.StyledText{&ansi.StyledText{
 				Label: host + " -- Connecting", Style: ansi.Underlined | hostStyle, FgCol: hostColor,
 			}}))
@@ -352,7 +404,6 @@ Examples:`+"\n  "+
 				//log.Println(host, err)
 				return
 			}
-			swg.Done()
 		}(host, iHost)
 
 		// Wait for the first connection to succeed before continuing to the rest of the hosts
