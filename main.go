@@ -26,7 +26,7 @@ import (
 )
 
 var (
-	userSetting    = flag.String("u", "", "Use this user rather than the current user")
+	userSetting    = flag.String("u", "", "Use this user rather than the current user for ssh connect")
 	hostListFile   = flag.String("h", "", "Read hosts from given host file")
 	hostListString = flag.String("H", "", "List of hosts defined in a quoted string \"host1, host2\"")
 	script         = flag.String("s", "", "If present, the script is uploaded and then executed remotely. If there are arguments after the\n"+
@@ -34,14 +34,13 @@ var (
 	command = flag.String("c", "", "If present, then commands are read from string.  Being that this is quoted, it allows globbing.\n"+
 		"If there are arguments after the string, they are assigned to the positional parameters,\n"+
 		"starting with $0.")
-	//	Command to execute remotely, a string sent to be executed.\n"+
-	//		"Useful when one wants to pass a binary or one or more commands with ';' in a single quoted string.")
 	parallel            = flag.Int("p", 4, "Maximum concurrent connections allowed")
 	shell               = flag.String("sh", "/bin/bash", "BaSH path to use for executing the script (-s) or command (-c) flags")
 	identity            = flag.String("i", "", "SSH identity file for login, the private key for single use")
 	disableAgent        = flag.Bool("A", false, "Disable SSH agent forwarding")
 	debug               = flag.Bool("d", false, "Turn on script debugging")
 	passwordMatch       = flag.String("pw", `^\[sudo\] password for `, "Send password for line matching")
+	timeout             = flag.Duration("w", 3*time.Second, "Timeout when probing for TCP listening port")
 	username, pass      string
 	sshInteractiveTries int
 	sshWorked           bool
@@ -122,7 +121,7 @@ Examples:`+"\n  "+
 	hostList = dedup(hostList)
 	{ // Loop over hosts to verify that the TCP port is connectable
 		var newHostList []string
-		d := net.Dialer{Timeout: 3 * time.Second}
+		d := net.Dialer{Timeout: *timeout}
 		for i, host := range hostList {
 			if _, _, err := net.SplitHostPort(host); err != nil {
 				host = net.JoinHostPort(host, "22")
@@ -190,6 +189,18 @@ Examples:`+"\n  "+
 			log.Fatal(err)
 		}
 		config.Auth = append([]ssh.AuthMethod{ssh.PublicKeys(key)}, config.Auth...)
+	}
+
+	// Test logging in and SUDO'ing to each host
+	var connectCount, sudoCount int
+	for iHost, host := range hostList {
+		client, err := ssh.Dial("tcp", host, config)
+		if err != nil {
+			continue
+		}
+		connectCount++
+
+		client.Close()
 	}
 
 	var (
