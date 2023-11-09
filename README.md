@@ -135,7 +135,7 @@ $ psudo -H localhost echo hi \; echo there
 
 Output:
 ```
-hi \; echo there
+hi ; echo there
 ```
 
 Use cases for this is when a single binary, such as `tar`, is invoked remotely
