@@ -20,14 +20,19 @@ password-attempt is made before cutting connections.
 
 - Optional ability to uploads multiple files for use as arguments (deleted upon finish)
 
-- Can run a `-c "command"` option (this translates to a `bash -c "command"` on
+## Invocation Methods
+
+- With a `-c "command"` option (this translates to a `bash -c "command"` on
   the target).  Note, with this option the entire command string must be wrapped
 in quotes and special characters escaped before the shell passes these
 arguments to the executable.
 
 - With the `-s script.sh` flag, a script is uploaded and then executed (translates to `bash script.sh`)
 
-- Run a generic command using the shell given upon creating an ssh session.  By not requiring wrapping quotes, one can work directly from the control system leveraging the local shell parsing of args to capture the args to be sent to each box.
+- Run a generic command using the shell given upon creating an ssh session.  By
+  not requiring wrapping quotes, one can work directly from the control system
+leveraging the local shell parsing of args to capture the args to be sent to
+each box.
 
 ## Functioning
 
