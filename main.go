@@ -204,6 +204,7 @@ Examples:`+"\n  "+
 	 * First pass logging in and testing the SUDO command to each host
 	 */
 	if !*disablePrecheck {
+		fmt.Fprintln(os.Stderr, "Verifying sudo access on hosts...")
 		var (
 			passwordLock   sync.Mutex
 			passwordLocked bool
