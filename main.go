@@ -45,17 +45,18 @@ var (
 	//batchBatchMode      = flag.Bool("bb", false, "Same as batch mode but continue with only passing hosts")
 	debug               = flag.Bool("d", false, "Turn on script debugging")
 	passwordMatch       = flag.String("pw", `^\[sudo\] password for `, "Send password for line matching")
-	timeout             = flag.Duration("w", 3*time.Second, "Timeout when probing for TCP listening port")
+	timeout             = flag.Duration("w", 5*time.Second, "Timeout when probing for TCP listening port")
 	username, pass      string
 	sshInteractiveTries int
 	sshWorked           bool
 	passwordRegex       *regexp.Regexp
 	version             string
 
-	durations  []time.Duration
-	exitCodes  []int
-	lineCounts []int
-	hostErrors []string
+	durations   []time.Duration
+	exitCodes   []int
+	lineCounts  []int
+	hostErrors  []string
+	clientCache []*ssh.Client
 	//globLock   sync.Mutex
 )
 
@@ -197,19 +198,23 @@ Examples:`+"\n  "+
 	}
 	AuthMethods := append(config.Auth, ssh.Password(pass))
 
-	// Test logging in and SUDO'ing to each host
+	clientCache = make([]*ssh.Client, *parallel)
+
+	/*
+	 * First pass logging in and testing the SUDO command to each host
+	 */
 	if !*disablePrecheck {
 		var (
-			passwordLock            sync.Mutex
-			passwordLocked          bool
-			passwordFail            bool
-			newHostList             []string
+			passwordLock   sync.Mutex
+			passwordLocked bool
+			passwordFail   bool
+			//newHostList             []string
 			connectCount, sudoCount int
-			swg                     = sizedwaitgroup.New(*parallel)
+			swg                     = sizedwaitgroup.New(*parallel * 2)
 		)
-		for _, host := range hostList {
+		for iHost, host := range hostList {
 			swg.Add()
-			go func(host string) error {
+			go func(iHost int, host string) error {
 				defer swg.Done()
 				if passwordFail {
 					return errors.New("skipped checks")
@@ -244,10 +249,14 @@ Examples:`+"\n  "+
 					fmt.Fprintln(os.Stderr, " ", host, " connect failed--", err)
 					return err
 				}
+				if iHost < *parallel {
+					clientCache[iHost] = client
+				} else {
+					defer client.Close()
+				}
 				if *debug {
 					fmt.Fprintln(os.Stderr, " ", host, " connected")
 				}
-				defer client.Close()
 
 				session, err := client.NewSession()
 				if err != nil {
@@ -332,7 +341,7 @@ Examples:`+"\n  "+
 					fmt.Fprintln(os.Stderr, " ", host, " sudo failed--", err)
 				} else if tries < 2 {
 					sudoCount++
-					newHostList = append(newHostList, host)
+					//newHostList = append(newHostList, host)
 					if *debug {
 						fmt.Fprintln(os.Stderr, " ", host, " sudo succeeded")
 					}
@@ -342,7 +351,7 @@ Examples:`+"\n  "+
 					passwordLock.Unlock()
 				}
 				return nil
-			}(host)
+			}(iHost, host)
 			/*if err != nil {
 				fmt.Fprintln(os.Stderr, " ", host, " err:", err)
 				os.Exit(1)
@@ -358,7 +367,7 @@ Examples:`+"\n  "+
 			}
 		}
 		//}
-		hostList = newHostList
+		//hostList = newHostList
 	}
 
 	shortList := shorten(hostList)
@@ -378,21 +387,34 @@ Examples:`+"\n  "+
 	)
 
 	for iHost, host := range hostList {
-		hostColor, hostStyle := getColour(iHost)
+		hostColor, hostBgColor, hostStyle := getColour(iHost)
 		swg.Add()
 		go func(host string, iHost int) {
 			defer swg.Done()
 			fmt.Println(ansi.String([]*ansi.StyledText{&ansi.StyledText{
-				Label: host + " -- Connecting", Style: ansi.Underlined | hostStyle, FgCol: hostColor,
+				Label: host + " -- Connecting", Style: ansi.Underlined | hostStyle,
+				FgCol: hostColor, BgCol: hostBgColor,
 			}}))
+
 			// Attempt connection into the first host
-			client, err := ssh.Dial("tcp", host, config)
+			var (
+				client *ssh.Client
+				err    error
+			)
+			if iHost < *parallel && clientCache[iHost] != nil {
+				//if *debug {
+				//	fmt.Println("using cached connection")
+				//}
+				client = clientCache[iHost]
+			} else {
+				client, err = ssh.Dial("tcp", host, config)
+				if err != nil {
+					log.Println(err)
+					return
+				}
+			}
 			if !checkPassed {
 				checkVerify <- err == nil
-			}
-			if err != nil {
-				log.Println(err)
-				return
 			}
 			sshWorked = true
 
@@ -427,10 +449,11 @@ Examples:`+"\n  "+
 	fmt.Printf("% -"+maxLenStr+"s  %s\n", "host", "ret  lines  duration")
 
 	for i, host := range shortList {
-		hostColor, hostStyle := getColour(i)
+		hostColor, hostBgColor, hostStyle := getColour(i)
 		fmt.Printf("%s  %-4d %-6d %v %s\n",
 			ansi.String([]*ansi.StyledText{&ansi.StyledText{
-				Label: fmt.Sprintf("%-"+maxLenStr+"s", host), Style: hostStyle, FgCol: hostColor,
+				Label: fmt.Sprintf("%-"+maxLenStr+"s", host), Style: hostStyle,
+				FgCol: hostColor, BgCol: hostBgColor,
 			}}),
 			exitCodes[i], lineCounts[i], durations[i], hostErrors[i])
 	}
@@ -444,7 +467,7 @@ func failUsage(msg string) {
 
 // Send the script over the ssh connection
 func execute(host string, client *ssh.Client, sshAgent *agent.ExtendedAgent, iHost int) error {
-	hostColor, hostStyle := getColour(iHost)
+	hostColor, hostBgColor, hostStyle := getColour(iHost)
 
 	// timer function
 	start := time.Now()
@@ -499,7 +522,7 @@ func execute(host string, client *ssh.Client, sshAgent *agent.ExtendedAgent, iHo
 
 			if *debug {
 				fmt.Println(ansi.String([]*ansi.StyledText{
-					&ansi.StyledText{Label: host + " <", FgCol: hostColor, Style: hostStyle},
+					&ansi.StyledText{Label: host + " <", FgCol: hostColor, BgCol: hostBgColor, Style: hostStyle},
 					&ansi.StyledText{Label: " Uploading file " + Src + " to " + dstFullName[iFile]},
 				}))
 			}
@@ -524,7 +547,7 @@ func execute(host string, client *ssh.Client, sshAgent *agent.ExtendedAgent, iHo
 
 			if *debug {
 				fmt.Println(ansi.String([]*ansi.StyledText{
-					&ansi.StyledText{Label: host + " <", FgCol: hostColor, Style: hostStyle},
+					&ansi.StyledText{Label: host + " <", FgCol: hostColor, BgCol: hostBgColor, Style: hostStyle},
 					&ansi.StyledText{Label: " Uploaded file " + Src + " to " + dstFullName[iFile]},
 				}))
 			}
@@ -585,7 +608,7 @@ func execute(host string, client *ssh.Client, sshAgent *agent.ExtendedAgent, iHo
 						fmt.Fprintf(stdin, "%s\n", pass)
 						if *debug {
 							fmt.Println(ansi.String([]*ansi.StyledText{
-								&ansi.StyledText{Label: host, FgCol: hostColor, Style: hostStyle},
+								&ansi.StyledText{Label: host, FgCol: hostColor, BgCol: hostBgColor, Style: hostStyle},
 								&ansi.StyledText{Label: " < sent password to sudo prompt---"},
 							}))
 						}
@@ -601,7 +624,7 @@ func execute(host string, client *ssh.Client, sshAgent *agent.ExtendedAgent, iHo
 						if len(styledText) > 0 {
 							fmt.Printf("%s", ansi.String(append(
 								[]*ansi.StyledText{
-									&ansi.StyledText{Label: host + " |", FgCol: hostColor, Style: hostStyle},
+									&ansi.StyledText{Label: host + " |", FgCol: hostColor, BgCol: hostBgColor, Style: hostStyle},
 									//				&ansi.StyledText{Label: " |"},
 								},
 								chopCarriageReturn(styledText)...)))
@@ -642,7 +665,7 @@ func execute(host string, client *ssh.Client, sshAgent *agent.ExtendedAgent, iHo
 		}
 		if *debug {
 			fmt.Println(ansi.String([]*ansi.StyledText{
-				&ansi.StyledText{Label: host + " > ", FgCol: hostColor, Style: hostStyle},
+				&ansi.StyledText{Label: host + " > ", FgCol: hostColor, BgCol: hostBgColor, Style: hostStyle},
 				&ansi.StyledText{Label: cmdLine}}))
 		}
 
@@ -729,9 +752,12 @@ func chopCarriageReturn(in []*ansi.StyledText) []*ansi.StyledText {
 	return in
 }
 
-func getColour(i int) (*ansi.Col, ansi.TextStyle) {
-	if i%10 < 5 {
-		return ansi.Cols[(i%10)+2], 0
+func getColour(i int) (fg *ansi.Col, bg *ansi.Col, style ansi.TextStyle) {
+	i = i % 9
+	if i < 2 {
+		return ansi.Cols[i+2], bg, 0
+	} else if i < 4 {
+		return ansi.Cols[i+3], bg, 0
 	}
-	return ansi.Cols[(i%10)-5+2], 1
+	return ansi.Cols[i-4+2], bg, 1
 }
