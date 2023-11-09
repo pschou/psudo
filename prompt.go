@@ -13,7 +13,7 @@ func confirm(s string) bool {
 
 	for {
 		// sent prompt
-		fmt.Fprintf(os.Stderr, "%s [y/n]: ", s)
+		fmt.Fprintf(os.Stderr, "%s [y/N]: ", s)
 
 		// read until new line character
 		response, err := reader.ReadString('\n')
@@ -27,7 +27,7 @@ func confirm(s string) bool {
 		// verify the response
 		if response == "y" || response == "yes" {
 			return true
-		} else if response == "n" || response == "no" {
+		} else if response == "n" || response == "no" || response == "" {
 			return false
 		}
 	}

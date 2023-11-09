@@ -37,9 +37,9 @@ var (
 		"If there are arguments after the string, they are assigned to the positional parameters,\n"+
 		"starting with $0.")
 	parallel        = flag.Int("p", 4, "Maximum concurrent connections allowed")
-	shell           = flag.String("sh", "/bin/bash", "BaSH path to use for executing the script (-s) or command (-c) flags")
+	shell           = flag.String("sh", "/bin/bash", "BASH path to use for executing the script (-s) or command (-c) flags")
 	identity        = flag.String("i", "", "SSH identity file for login, the private key for single use")
-	disableAgent    = flag.Bool("A", false, "Disable SSH agent forwarding")
+	disableAgent    = flag.Bool("a", false, "Disable SSH agent forwarding")
 	disablePrecheck = flag.Bool("f", false, "Force mode, disable prechecks and if login attempts are limited this may lock you out.")
 	batchMode       = flag.Bool("b", false, "Batch mode, disable prompt after prechecks are done if everything passes")
 	//batchBatchMode      = flag.Bool("bb", false, "Same as batch mode but continue with only passing hosts")
@@ -84,6 +84,9 @@ Examples:`+"\n  "+
 	}
 	flag.Parse()
 
+	if strings.ToLower(strings.Join(flag.Args(), " ")) == "make me a sandwich" {
+		egg()
+	}
 	if *hostListFile == "" && *hostListString == "" {
 		failUsage("Missing host list")
 	}
@@ -92,6 +95,13 @@ Examples:`+"\n  "+
 	}
 	if *script != "" && *command != "" {
 		failUsage("Must have specify a script or command, not both.")
+	}
+	if *script != "" {
+		fh, err := os.Open(*script)
+		if err != nil {
+			log.Fatal("Unable to open script file", *script, "--", err)
+		}
+		fh.Close()
 	}
 	passwordRegex = regexp.MustCompile(*passwordMatch)
 
@@ -248,6 +258,7 @@ Examples:`+"\n  "+
 				}
 				if err != nil {
 					fmt.Fprintln(os.Stderr, " ", host, " connect failed--", err)
+					os.Exit(1)
 					return err
 				}
 				if iHost < *parallel {
@@ -331,7 +342,7 @@ Examples:`+"\n  "+
 					}
 					closed <- true
 				}()
-				session.Start("/usr/bin/true")
+				session.Start("sudo /usr/bin/true")
 				err = session.Wait()
 				<-closed
 				if err != nil {
