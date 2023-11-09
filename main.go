@@ -318,6 +318,7 @@ Examples:`+"\n  "+
 								continue
 							}
 							if passwordRegex.Match([]byte(str)) {
+								tries++
 								if tries > 1 {
 									log.Fatal("SUDO incorrect password")
 									//stdin.Close()
@@ -325,7 +326,6 @@ Examples:`+"\n  "+
 								}
 								passwordLock.Lock()
 								passwordLocked = true
-								tries++
 								fmt.Fprintf(stdin, "%s\n", pass)
 								if *debug {
 									fmt.Fprintln(os.Stderr, " ", host, " sent password to sudo prompt")
