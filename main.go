@@ -64,11 +64,13 @@ var (
 	version string
 
 	// output report metrics
-	durations   []time.Duration
-	exitCodes   []int
-	lineCounts  []int
-	hostErrors  []string
+	durations  []time.Duration
+	exitCodes  []int
+	lineCounts []int
+	hostErrors []string
+
 	clientCache []*ssh.Client
+	clientOnce  []sync.Mutex
 )
 
 func main() {
@@ -95,6 +97,9 @@ Examples:`+"\n  "+
 	}
 	flag.Parse()
 
+	if *parallelCache < *parallel {
+		*parallelCache = *parallel
+	}
 	if strings.ToLower(strings.Join(flag.Args(), " ")) == "make me a sandwich" {
 		egg()
 	}
@@ -228,7 +233,8 @@ Examples:`+"\n  "+
 		return pass(), nil
 	}))
 
-	clientCache = make([]*ssh.Client, *parallelCache)
+	clientCache = make([]*ssh.Client, len(hostList))
+	clientOnce = make([]sync.Mutex, len(hostList))
 
 	/*
 	 * Precheck: Do a log in and test the SUDO command on each host
@@ -299,7 +305,7 @@ Examples:`+"\n  "+
 				}
 
 				// Keep the first few sessions open in a cache to improve performance
-				if iHost < len(clientCache) {
+				if iHost < *parallelCache {
 					clientCache[iHost] = client
 				} else {
 					defer client.Close()
@@ -465,60 +471,62 @@ Examples:`+"\n  "+
 	 *  Main worker loop- loop over each host and sends out commands in parallel
 	 */
 	var (
-		checkPassed bool
-		checkVerify = make(chan bool)
-		swg         = sizedwaitgroup.New(*parallel)
+		swg      = sizedwaitgroup.New(*parallel)
+		swgCache = sizedwaitgroup.New(*parallelCache)
 	)
+	for i := 0; i < *parallelCache && i < len(hostList); i++ {
+		swgCache.Add() // fill up the waitgroup
+	}
+	for i := *parallelCache; i < len(hostList); i++ {
+		clientOnce[i].Lock() // lock the rest to avoid double connecting
+	}
+	// Pre login to hosts
+	go func() {
+		for i := *parallelCache; i < len(hostList); i++ {
+			swgCache.Add()
+			go func(i int) {
+				defer clientOnce[i].Unlock()
+				host := hostList[i]
+				client, err := ssh.Dial("tcp", host, config)
+				if err != nil {
+					hostErrors[i] = fmt.Sprintf("%v", err)
+				}
+				clientCache[i] = client
+			}(i)
+		}
+	}()
 
 	for iHost, host := range hostList {
 		hostColor, hostBgColor, hostStyle := getColour(iHost)
+		swgCache.Done()
 		swg.Add()
 		go func(host string, iHost int) {
 			defer swg.Done()
+
+			clientOnce[iHost].Lock()
+			client := clientCache[iHost]
+			if client == nil {
+				fmt.Fprintln(os.Stderr, ansi.String([]*ansi.StyledText{&ansi.StyledText{
+					Label: host + " -- Failed", Style: ansi.Underlined | hostStyle,
+					FgCol: hostColor, BgCol: hostBgColor,
+				}}))
+				return
+			}
+			defer client.Close()
+
 			fmt.Fprintln(os.Stderr, ansi.String([]*ansi.StyledText{&ansi.StyledText{
-				Label: host + " -- Connecting", Style: ansi.Underlined | hostStyle,
+				Label: host + " -- Connected", Style: ansi.Underlined | hostStyle,
 				FgCol: hostColor, BgCol: hostBgColor,
 			}}))
 
-			// Attempt connection into the first host
-			var (
-				client *ssh.Client
-				err    error
-			)
-			if iHost < len(clientCache) && clientCache[iHost] != nil {
-				//if *debug {
-				//	fmt.Println("using cached connection")
-				//}
-				client = clientCache[iHost]
-			} else {
-				client, err = ssh.Dial("tcp", host, config)
-				if err != nil {
-					log.Println(err)
-					return
-				}
-			}
-			if !checkPassed {
-				checkVerify <- err == nil
-			}
-
-			defer client.Close()
-
 			// Attempt initial send to one client
-			err = execute(strings.TrimSuffix(shortList[iHost], ":22"), client, sshAgent, iHost)
+			err := execute(strings.TrimSuffix(shortList[iHost], ":22"), client, sshAgent, iHost)
 			if err != nil {
 				hostErrors[iHost] = fmt.Sprintf("%v", err)
 				//log.Println(host, err)
 				return
 			}
 		}(host, iHost)
-
-		// Wait for the first connection to succeed before continuing to the rest of the hosts
-		if !checkPassed {
-			checkPassed = <-checkVerify
-			if !checkPassed {
-				log.Fatal("error connecting to first host, verify credentials before proceeding")
-			}
-		}
 	}
 	swg.Wait()
 	fmt.Fprintln(os.Stderr, "--- Results ---")
