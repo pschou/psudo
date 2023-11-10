@@ -39,9 +39,10 @@ var (
 		"If present, then commands are read from string like an inline script.  Because the string\n"+
 			"is quoted, it allows for globbing (ie: *.log).  If there are arguments after the string,\n"+
 			"they are assigned to the positional parameters, starting with $0.")
-	parallel = flag.Int("p", 4, "Maximum concurrent connections allowed")
-	shell    = flag.String("sh", "/bin/bash", "BASH path to use for executing the script (-s) or command (-c) flags")
-	sudo     = flag.String("sudo", "/usr/bin/sudo /usr/bin/true",
+	parallel      = flag.Int("p", 4, "Maximum concurrent connections allowed")
+	parallelCache = flag.Int("pc", 40, "Max cached concurrent connections allowed")
+	shell         = flag.String("sh", "/bin/bash", "BASH path to use for executing the script (-s) or command (-c) flags")
+	sudo          = flag.String("sudo", "/usr/bin/sudo /usr/bin/true",
 		"Command to use for privilage escilation precheck.  This command must return a 0 exit code.\n"+
 			"Disable the sudo precheck by setting to \"\".")
 	identity        = flag.String("i", "", "SSH identity file for login, the private key for single use")
@@ -227,7 +228,7 @@ Examples:`+"\n  "+
 		return pass(), nil
 	}))
 
-	clientCache = make([]*ssh.Client, *parallel*2)
+	clientCache = make([]*ssh.Client, *parallelCache)
 
 	/*
 	 * Precheck: Do a log in and test the SUDO command on each host
@@ -298,7 +299,7 @@ Examples:`+"\n  "+
 				}
 
 				// Keep the first few sessions open in a cache to improve performance
-				if iHost < *parallel*2 {
+				if iHost < len(clientCache) {
 					clientCache[iHost] = client
 				} else {
 					defer client.Close()
@@ -484,7 +485,7 @@ Examples:`+"\n  "+
 				client *ssh.Client
 				err    error
 			)
-			if iHost < *parallel*2 && clientCache[iHost] != nil {
+			if iHost < len(clientCache) && clientCache[iHost] != nil {
 				//if *debug {
 				//	fmt.Println("using cached connection")
 				//}
