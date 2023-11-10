@@ -4,31 +4,43 @@ import (
 	"fmt"
 	"log"
 	"os"
-	"os/user"
 	"strings"
+	"sync"
 	"syscall"
 
 	"golang.org/x/term"
 )
 
-func credentials() (string, string, error) {
-	if strings.TrimSpace(*userSetting) == "" {
-		currentUser, err := user.Current()
+var (
+	getPasswordOnce sync.Once
+	passwordCred    string
+
+	getPasscodeOnce sync.Once
+	passcodeCred    string
+)
+
+func pass() string {
+	getPasswordOnce.Do(func() {
+		fmt.Fprintf(os.Stderr, "Enter Password for %q: ", username)
+		bytePassword, err := term.ReadPassword(int(syscall.Stdin))
+		fmt.Fprintln(os.Stderr)
 		if err != nil {
-			log.Fatalf(err.Error())
+			log.Fatal(err)
 		}
-		username = currentUser.Username
-	} else {
-		username = *userSetting
-	}
+		passwordCred = strings.TrimSpace(string(bytePassword))
+	})
+	return passwordCred
+}
 
-	fmt.Fprintf(os.Stderr, "Enter Password for %q: ", username)
-	bytePassword, err := term.ReadPassword(int(syscall.Stdin))
-	fmt.Println()
-	if err != nil {
-		return "", "", err
-	}
-
-	password := string(bytePassword)
-	return strings.TrimSpace(username), strings.TrimSpace(password), nil
+func code() string {
+	getPasscodeOnce.Do(func() {
+		fmt.Fprintf(os.Stderr, "Enter Pass CODE for %q: ", username)
+		bytePasscode, err := term.ReadPassword(int(syscall.Stdin))
+		fmt.Fprintln(os.Stderr)
+		if err != nil {
+			log.Fatal(err)
+		}
+		passcodeCred = strings.TrimSpace(string(bytePasscode))
+	})
+	return passcodeCred
 }

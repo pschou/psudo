@@ -12,6 +12,7 @@ import (
 	"log"
 	"net"
 	"os"
+	"os/user"
 	"path"
 	"path/filepath"
 	"regexp"
@@ -31,33 +32,42 @@ var (
 	userSetting    = flag.String("u", "", "Use this user rather than the current user for ssh connect")
 	hostListFile   = flag.String("h", "", "Read hosts from given host file")
 	hostListString = flag.String("H", "", "List of hosts defined in a quoted string \"host1, host2\"")
-	script         = flag.String("s", "", "If present, the script is uploaded and then executed remotely. If there are arguments after the\n"+
-		"string, they are assigned to the positional parameters, starting with $1.")
-	command = flag.String("c", "", "If present, then commands are read from string.  Being that this is quoted, it allows globbing.\n"+
-		"If there are arguments after the string, they are assigned to the positional parameters,\n"+
-		"starting with $0.")
-	parallel        = flag.Int("p", 4, "Maximum concurrent connections allowed")
-	shell           = flag.String("sh", "/bin/bash", "BASH path to use for executing the script (-s) or command (-c) flags")
+	script         = flag.String("s", "",
+		"If present, the script is uploaded and then executed remotely. If there are arguments after\n"+
+			"the string, they are assigned to the positional parameters, starting with $1.")
+	command = flag.String("c", "",
+		"If present, then commands are read from string like an inline script.  Because the string\n"+
+			"is quoted, it allows for globbing (ie: *.log).  If there are arguments after the string,\n"+
+			"they are assigned to the positional parameters, starting with $0.")
+	parallel = flag.Int("p", 4, "Maximum concurrent connections allowed")
+	shell    = flag.String("sh", "/bin/bash", "BASH path to use for executing the script (-s) or command (-c) flags")
+	sudo     = flag.String("sudo", "/usr/bin/sudo /usr/bin/true",
+		"Command to use for privilage escilation precheck.  This command must return a 0 exit code.\n"+
+			"Disable the sudo precheck by setting to \"\".")
 	identity        = flag.String("i", "", "SSH identity file for login, the private key for single use")
 	disableAgent    = flag.Bool("a", false, "Disable SSH agent forwarding")
-	disablePrecheck = flag.Bool("f", false, "Force mode, disable prechecks and if login attempts are limited this may lock you out.")
+	disablePrecheck = flag.Bool("f", false, "Force mode, disable prechecks-- if login attempts are limited this may lock you out.")
 	batchMode       = flag.Bool("b", false, "Batch mode, disable prompt after prechecks are done if everything passes")
-	//batchBatchMode      = flag.Bool("bb", false, "Same as batch mode but continue with only passing hosts")
-	debug               = flag.Bool("d", false, "Turn on script debugging")
-	passwordMatch       = flag.String("pw", `^\[sudo\] password for `, "Send password for line matching")
-	timeout             = flag.Duration("w", 5*time.Second, "Timeout when probing for TCP listening port")
-	username, pass      string
-	sshInteractiveTries int
-	sshWorked           bool
-	passwordRegex       *regexp.Regexp
-	version             string
+	debug           = flag.Bool("d", false, "Turn on script debugging")
+	passwordMatch   = flag.String("match_pw", `^\[sudo\] password for `, "Send password for line matching")
+	passcodeMatch   = flag.String("match_code", `^Passcode( or option|):`, "Send a passcode for line matching")
+	timeout         = flag.Duration("w", 5*time.Second, "Timeout when probing for TCP listening port")
 
+	// username for login
+	username string
+
+	// precompiled regexp for matching
+	passwordRegex, passcodeRegex *regexp.Regexp
+
+	// version set at compile time
+	version string
+
+	// output report metrics
 	durations   []time.Duration
 	exitCodes   []int
 	lineCounts  []int
 	hostErrors  []string
 	clientCache []*ssh.Client
-	//globLock   sync.Mutex
 )
 
 func main() {
@@ -90,7 +100,7 @@ Examples:`+"\n  "+
 	if *hostListFile == "" && *hostListString == "" {
 		failUsage("Missing host list")
 	}
-	if *script == "" && len(flag.Args()) == 0 && *command == "" {
+	if *script == "" && *command == "" && len(flag.Args()) == 0 {
 		failUsage("Missing command to execute")
 	}
 	if *script != "" && *command != "" {
@@ -104,6 +114,19 @@ Examples:`+"\n  "+
 		fh.Close()
 	}
 	passwordRegex = regexp.MustCompile(*passwordMatch)
+	passcodeRegex = regexp.MustCompile(*passcodeMatch)
+
+	// Determine username to use
+	if strings.TrimSpace(*userSetting) == "" {
+		currentUser, err := user.Current()
+		if err != nil {
+			log.Fatalf(err.Error())
+		}
+		username = currentUser.Username
+	} else {
+		username = *userSetting
+	}
+	username = strings.TrimSpace(username)
 
 	// Parse out the script args and make sure all the files are readable
 	{
@@ -164,13 +187,6 @@ Examples:`+"\n  "+
 		return
 	}
 
-	// Prompt for credentials (for login and sudo)
-	var err error
-	username, pass, err = credentials()
-	if err != nil {
-		log.Fatal(err)
-	}
-
 	// Build configuration for ssh
 	config := &ssh.ClientConfig{
 		User: username,
@@ -206,20 +222,25 @@ Examples:`+"\n  "+
 		}
 		config.Auth = append([]ssh.AuthMethod{ssh.PublicKeys(key)}, config.Auth...)
 	}
-	AuthMethods := append(config.Auth, ssh.Password(pass))
 
-	clientCache = make([]*ssh.Client, *parallel)
+	AuthMethods := append(config.Auth, ssh.PasswordCallback(func() (secret string, err error) {
+		return pass(), nil
+	}))
+
+	clientCache = make([]*ssh.Client, *parallel*2)
 
 	/*
-	 * First pass logging in and testing the SUDO command to each host
+	 * Precheck: Do a log in and test the SUDO command on each host
 	 */
 	if !*disablePrecheck {
 		fmt.Fprintln(os.Stderr, "Verifying sudo access on hosts...")
 		var (
 			passwordLock   sync.Mutex
 			passwordLocked bool
-			passwordFail   bool
-			//newHostList             []string
+			passcodeLock   sync.Mutex
+			passcodeLocked bool
+			precheckFail   bool
+
 			connectCount, sudoCount int
 			swg                     = sizedwaitgroup.New(*parallel * 2)
 		)
@@ -227,21 +248,28 @@ Examples:`+"\n  "+
 			swg.Add()
 			go func(iHost int, host string) error {
 				defer swg.Done()
-				if passwordFail {
-					return errors.New("skipped checks")
+				if precheckFail {
+					return errors.New("skipped checks") // Shouldn't get here, but to be sure.
 				}
 
+				var (
+					passwordTries int
+					passcodeTries int
+				)
+
 				// Call back so we can get a count of the number of password tries
-				passwordCount := 0
 				passwordCallBack := func() (secret string, err error) {
 					passwordLock.Lock()
+					if precheckFail {
+						os.Exit(1)
+					}
 					passwordLocked = true
-					passwordCount++
-					if passwordCount > 1 || passwordFail {
-						passwordFail = true
+					passwordTries++
+					if passwordTries > 1 {
+						precheckFail = true
 						log.Fatal("SSH Login incorrect password")
 					}
-					return pass, nil
+					return pass(), nil
 				}
 
 				// Setup the test config to send with the connection
@@ -251,17 +279,26 @@ Examples:`+"\n  "+
 					HostKeyCallback: ssh.InsecureIgnoreHostKey(),
 				}
 				client, err := ssh.Dial("tcp", host, testConfig)
-				passwordFail = passwordFail || err != nil
-				if passwordLocked {
-					passwordLocked = false
-					passwordLock.Unlock()
+				if precheckFail {
+					return err
 				}
 				if err != nil {
+					precheckFail = true
 					fmt.Fprintln(os.Stderr, " ", host, " connect failed--", err)
 					os.Exit(1)
 					return err
 				}
-				if iHost < *parallel {
+				if passwordLocked {
+					passwordLocked = false
+					passwordLock.Unlock()
+				}
+				if passcodeLocked {
+					passcodeLocked = false
+					passcodeLock.Unlock()
+				}
+
+				// Keep the first few sessions open in a cache to improve performance
+				if iHost < *parallel*2 {
 					clientCache[iHost] = client
 				} else {
 					defer client.Close()
@@ -295,14 +332,16 @@ Examples:`+"\n  "+
 					return err
 				}
 
-				stdin, _ := session.StdinPipe()
-				stdout, _ := session.StdoutPipe()
-
 				var (
+					stdin, _  = session.StdinPipe()
+					stdout, _ = session.StdoutPipe()
+
 					channelOpen = true
 					closed      = make(chan bool)
-					tries       int
 				)
+				passwordTries = 0
+				passcodeTries = 0
+
 				// Read the input from the reader and print it to the screen
 				go func() {
 					buff := new(bytes.Buffer)
@@ -317,22 +356,41 @@ Examples:`+"\n  "+
 								doChomp = false
 								continue
 							}
+							// Match for the sudo prompt
 							if passwordRegex.Match([]byte(str)) {
-								tries++
-								if tries > 1 {
-									log.Fatal("SUDO incorrect password")
-									//stdin.Close()
-									//return
+								passwordTries++
+								if passwordTries > 1 {
+									hostErrors[iHost] = "SUDO incorrect password"
+									fmt.Fprintln(os.Stderr, " ", host, " SUDO incorrect password")
+									return
 								}
 								passwordLock.Lock()
 								passwordLocked = true
-								fmt.Fprintf(stdin, "%s\n", pass)
+								fmt.Fprintf(stdin, "%s\n", pass())
 								if *debug {
 									fmt.Fprintln(os.Stderr, " ", host, " sent password to sudo prompt")
 								}
 								doChomp = true
-								str = ""
+								continue
 							}
+							// Match for the passcode prompt
+							if passcodeRegex.Match([]byte(str)) {
+								passcodeTries++
+								if passcodeTries > 1 {
+									hostErrors[iHost] = "Incorrect pass CODE"
+									fmt.Fprintln(os.Stderr, " ", host, " Incorrect pass CODE")
+									return
+								}
+								passcodeLock.Lock()
+								passcodeLocked = true
+								fmt.Fprintf(stdin, "%s\n", code())
+								if *debug {
+									fmt.Fprintln(os.Stderr, " ", host, " sent password to sudo prompt")
+								}
+								doChomp = true
+								continue
+							}
+
 							if err != nil {
 								// This may be a partial line, put it back in the buffer and break the loop
 								buff.Write([]byte(str))
@@ -342,25 +400,33 @@ Examples:`+"\n  "+
 					}
 					closed <- true
 				}()
-				session.Start("sudo /usr/bin/true")
-				err = session.Wait()
-				<-closed
-				if err != nil {
-					if passwordLocked {
-						passwordFail = true
-						os.Exit(1)
-					}
-					fmt.Fprintln(os.Stderr, " ", host, " sudo failed--", err)
-				} else if tries < 2 {
-					sudoCount++
-					//newHostList = append(newHostList, host)
-					if *debug {
-						fmt.Fprintln(os.Stderr, " ", host, " sudo succeeded")
+
+				if *sudo != "" {
+					// Do sudo precheck if a command is specified
+					session.Start(*sudo)
+					err = session.Wait()
+					<-closed
+					if err != nil {
+						if passwordLocked {
+							precheckFail = true
+							os.Exit(1)
+						}
+						fmt.Fprintln(os.Stderr, " ", host, " sudo failed--", err)
+					} else if passwordTries < 2 {
+						sudoCount++
+						//newHostList = append(newHostList, host)
+						if *debug {
+							fmt.Fprintln(os.Stderr, " ", host, " sudo succeeded")
+						}
 					}
 				}
 				if passwordLocked {
 					passwordLocked = false
 					passwordLock.Unlock()
+				}
+				if passcodeLocked {
+					passcodeLocked = false
+					passcodeLock.Unlock()
 				}
 				return nil
 			}(iHost, host)
@@ -371,7 +437,12 @@ Examples:`+"\n  "+
 		}
 		swg.Wait()
 
-		fmt.Fprintln(os.Stderr, "Login was successful on", connectCount, "hosts and sudo on", sudoCount, "hosts")
+		if *sudo != "" {
+			fmt.Fprintln(os.Stderr, "Login was successful on", connectCount, "hosts and sudo on", sudoCount, "hosts")
+		} else {
+			fmt.Fprintln(os.Stderr, "Login was successful on", connectCount, "hosts and no sudo check was done")
+			sudoCount = connectCount
+		}
 		//	if !*batchBatchMode {
 		if !*batchMode || originalHostCount > sudoCount {
 			if !confirm("Continue? ") {
@@ -390,7 +461,7 @@ Examples:`+"\n  "+
 	config.Auth = AuthMethods
 
 	/*
-	 *  Main worker loop, goes over each host and sends out commands
+	 *  Main worker loop- loop over each host and sends out commands in parallel
 	 */
 	var (
 		checkPassed bool
@@ -403,7 +474,7 @@ Examples:`+"\n  "+
 		swg.Add()
 		go func(host string, iHost int) {
 			defer swg.Done()
-			fmt.Println(ansi.String([]*ansi.StyledText{&ansi.StyledText{
+			fmt.Fprintln(os.Stderr, ansi.String([]*ansi.StyledText{&ansi.StyledText{
 				Label: host + " -- Connecting", Style: ansi.Underlined | hostStyle,
 				FgCol: hostColor, BgCol: hostBgColor,
 			}}))
@@ -413,7 +484,7 @@ Examples:`+"\n  "+
 				client *ssh.Client
 				err    error
 			)
-			if iHost < *parallel && clientCache[iHost] != nil {
+			if iHost < *parallel*2 && clientCache[iHost] != nil {
 				//if *debug {
 				//	fmt.Println("using cached connection")
 				//}
@@ -428,7 +499,6 @@ Examples:`+"\n  "+
 			if !checkPassed {
 				checkVerify <- err == nil
 			}
-			sshWorked = true
 
 			defer client.Close()
 
@@ -450,7 +520,7 @@ Examples:`+"\n  "+
 		}
 	}
 	swg.Wait()
-	fmt.Println("--- Results ---")
+	fmt.Fprintln(os.Stderr, "--- Results ---")
 	maxLen := 0
 	for _, host := range shortList {
 		if len(host) > maxLen {
@@ -458,11 +528,11 @@ Examples:`+"\n  "+
 		}
 	}
 	maxLenStr := fmt.Sprintf("%d", maxLen)
-	fmt.Printf("% -"+maxLenStr+"s  %s\n", "host", "ret  lines  duration")
+	fmt.Fprintf(os.Stderr, "% -"+maxLenStr+"s  %s\n", "host", "ret  lines  duration")
 
 	for i, host := range shortList {
 		hostColor, hostBgColor, hostStyle := getColour(i)
-		fmt.Printf("%s  %-4d %-6d %v %s\n",
+		fmt.Fprintf(os.Stderr, "%s  %-4d %-6d %v %s\n",
 			ansi.String([]*ansi.StyledText{&ansi.StyledText{
 				Label: fmt.Sprintf("%-"+maxLenStr+"s", host), Style: hostStyle,
 				FgCol: hostColor, BgCol: hostBgColor,
@@ -617,11 +687,22 @@ func execute(host string, client *ssh.Client, sshAgent *agent.ExtendedAgent, iHo
 						continue
 					}
 					if passwordRegex.Match([]byte(str)) {
-						fmt.Fprintf(stdin, "%s\n", pass)
+						fmt.Fprintf(stdin, "%s\n", pass())
 						if *debug {
 							fmt.Println(ansi.String([]*ansi.StyledText{
 								&ansi.StyledText{Label: host, FgCol: hostColor, BgCol: hostBgColor, Style: hostStyle},
 								&ansi.StyledText{Label: " < sent password to sudo prompt---"},
+							}))
+						}
+						doChomp = true
+						str = ""
+					}
+					if passcodeRegex.Match([]byte(str)) {
+						fmt.Fprintf(stdin, "%s\n", code())
+						if *debug {
+							fmt.Println(ansi.String([]*ansi.StyledText{
+								&ansi.StyledText{Label: host, FgCol: hostColor, BgCol: hostBgColor, Style: hostStyle},
+								&ansi.StyledText{Label: " < sent pass CODE to sudo prompt---"},
 							}))
 						}
 						doChomp = true
@@ -713,21 +794,6 @@ func execute(host string, client *ssh.Client, sshAgent *agent.ExtendedAgent, iHo
 	}
 	//fmt.Println("returning")
 	return nil
-}
-
-// Interactive login handler, answer a password question
-func SshInteractive(user, instruction string, questions []string, echos []bool) (answers []string, err error) {
-	sshInteractiveTries++
-	if sshInteractiveTries > 1 && !sshWorked {
-		log.Fatal("Bailing out early, password failed once")
-	}
-	answers = make([]string, len(questions))
-	// The second parameter is unused
-	for n, _ := range questions {
-		answers[n] = pass
-	}
-
-	return answers, nil
 }
 
 // Generate a temp file name
