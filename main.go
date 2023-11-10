@@ -29,6 +29,7 @@ import (
 )
 
 var (
+	disableColors  = flag.Bool("nc", false, "Turn off colors on the reply lines")
 	userSetting    = flag.String("u", "", "Use this user rather than the current user for ssh connect")
 	hostListFile   = flag.String("h", "", "Read hosts from given host file")
 	hostListString = flag.String("H", "", "List of hosts defined in a quoted string \"host1, host2\"")
@@ -151,7 +152,7 @@ Examples:`+"\n  "+
 
 	// Host list from command line
 	hostList := strings.FieldsFunc(*hostListString, func(c rune) bool {
-		return c == ',' || c == ' '
+		return c == ',' || c == ' ' || c == '\n' || c == '\r' || c == '\t'
 	})
 
 	if *hostListFile != "" {
@@ -506,18 +507,18 @@ Examples:`+"\n  "+
 			clientOnce[iHost].Lock()
 			client := clientCache[iHost]
 			if client == nil {
-				fmt.Fprintln(os.Stderr, ansi.String([]*ansi.StyledText{&ansi.StyledText{
+				fmt.Fprintln(os.Stderr, s(ansi.String([]*ansi.StyledText{&ansi.StyledText{
 					Label: host + " -- Failed", Style: ansi.Underlined | hostStyle,
 					FgCol: hostColor, BgCol: hostBgColor,
-				}}))
+				}})))
 				return
 			}
 			defer client.Close()
 
-			fmt.Fprintln(os.Stderr, ansi.String([]*ansi.StyledText{&ansi.StyledText{
+			fmt.Fprintln(os.Stderr, s(ansi.String([]*ansi.StyledText{&ansi.StyledText{
 				Label: host + " -- Connected", Style: ansi.Underlined | hostStyle,
 				FgCol: hostColor, BgCol: hostBgColor,
-			}}))
+			}})))
 
 			// Attempt initial send to one client
 			err := execute(strings.TrimSuffix(shortList[iHost], ":22"), client, sshAgent, iHost)
@@ -542,10 +543,10 @@ Examples:`+"\n  "+
 	for i, host := range shortList {
 		hostColor, hostBgColor, hostStyle := getColour(i)
 		fmt.Fprintf(os.Stderr, "%s  %-4d %-6d %v %s\n",
-			ansi.String([]*ansi.StyledText{&ansi.StyledText{
+			s(ansi.String([]*ansi.StyledText{&ansi.StyledText{
 				Label: fmt.Sprintf("%-"+maxLenStr+"s", host), Style: hostStyle,
 				FgCol: hostColor, BgCol: hostBgColor,
-			}}),
+			}})),
 			exitCodes[i], lineCounts[i], durations[i], hostErrors[i])
 	}
 }
@@ -612,10 +613,10 @@ func execute(host string, client *ssh.Client, sshAgent *agent.ExtendedAgent, iHo
 			}
 
 			if *debug {
-				fmt.Println(ansi.String([]*ansi.StyledText{
+				fmt.Println(s(ansi.String([]*ansi.StyledText{
 					&ansi.StyledText{Label: host + " <", FgCol: hostColor, BgCol: hostBgColor, Style: hostStyle},
 					&ansi.StyledText{Label: " Uploading file " + Src + " to " + dstFullName[iFile]},
-				}))
+				})))
 			}
 			fh, err := os.Open(Src)
 			if err != nil {
@@ -637,10 +638,10 @@ func execute(host string, client *ssh.Client, sshAgent *agent.ExtendedAgent, iHo
 			}
 
 			if *debug {
-				fmt.Println(ansi.String([]*ansi.StyledText{
+				fmt.Println(s(ansi.String([]*ansi.StyledText{
 					&ansi.StyledText{Label: host + " <", FgCol: hostColor, BgCol: hostBgColor, Style: hostStyle},
 					&ansi.StyledText{Label: " Uploaded file " + Src + " to " + dstFullName[iFile]},
-				}))
+				})))
 			}
 
 			cli.Close()
@@ -682,6 +683,7 @@ func execute(host string, client *ssh.Client, sshAgent *agent.ExtendedAgent, iHo
 
 		// Read the input from the reader and print it to the screen
 		handler := func(input io.Reader, fd int, c chan bool, iHost int) {
+			defer func() { c <- true }()
 			buff := new(bytes.Buffer)
 			rdr := make([]byte, 32<<10)
 			var curStyle = new(ansi.StyledText)
@@ -698,10 +700,10 @@ func execute(host string, client *ssh.Client, sshAgent *agent.ExtendedAgent, iHo
 					if passwordRegex.Match([]byte(str)) {
 						fmt.Fprintf(stdin, "%s\n", pass())
 						if *debug {
-							fmt.Println(ansi.String([]*ansi.StyledText{
+							fmt.Println(s(ansi.String([]*ansi.StyledText{
 								&ansi.StyledText{Label: host, FgCol: hostColor, BgCol: hostBgColor, Style: hostStyle},
 								&ansi.StyledText{Label: " < sent password to sudo prompt---"},
-							}))
+							})))
 						}
 						doChomp = true
 						str = ""
@@ -709,10 +711,10 @@ func execute(host string, client *ssh.Client, sshAgent *agent.ExtendedAgent, iHo
 					if passcodeRegex.Match([]byte(str)) {
 						fmt.Fprintf(stdin, "%s\n", code())
 						if *debug {
-							fmt.Println(ansi.String([]*ansi.StyledText{
+							fmt.Println(s(ansi.String([]*ansi.StyledText{
 								&ansi.StyledText{Label: host, FgCol: hostColor, BgCol: hostBgColor, Style: hostStyle},
 								&ansi.StyledText{Label: " < sent pass CODE to sudo prompt---"},
-							}))
+							})))
 						}
 						doChomp = true
 						str = ""
@@ -724,12 +726,12 @@ func execute(host string, client *ssh.Client, sshAgent *agent.ExtendedAgent, iHo
 							ansi.WithIgnoreInvalidCodes())
 						styledText = chopCarriageReturn(styledText)
 						if len(styledText) > 0 {
-							fmt.Printf("%s", ansi.String(append(
+							styledText[len(styledText)-1].Label = strings.TrimSuffix(styledText[len(styledText)-1].Label, "\n")
+							fmt.Printf("%s\n", s(ansi.String(append(
 								[]*ansi.StyledText{
 									&ansi.StyledText{Label: host + " |", FgCol: hostColor, BgCol: hostBgColor, Style: hostStyle},
 									//				&ansi.StyledText{Label: " |"},
-								},
-								chopCarriageReturn(styledText)...)))
+								}, styledText...))))
 
 							// Save current style
 							curStyle = styledText[len(styledText)-1]
@@ -743,7 +745,6 @@ func execute(host string, client *ssh.Client, sshAgent *agent.ExtendedAgent, iHo
 					}
 				}
 			}
-			c <- true
 		}
 
 		a := make(chan bool)
@@ -766,9 +767,9 @@ func execute(host string, client *ssh.Client, sshAgent *agent.ExtendedAgent, iHo
 			}
 		}
 		if *debug {
-			fmt.Println(ansi.String([]*ansi.StyledText{
+			fmt.Println(s(ansi.String([]*ansi.StyledText{
 				&ansi.StyledText{Label: host + " > ", FgCol: hostColor, BgCol: hostBgColor, Style: hostStyle},
-				&ansi.StyledText{Label: cmdLine}}))
+				&ansi.StyledText{Label: cmdLine}})))
 		}
 
 		session.Start(cmdLine)
@@ -847,4 +848,13 @@ func getColour(i int) (fg *ansi.Col, bg *ansi.Col, style ansi.TextStyle) {
 		return ansi.Cols[i+3], bg, 0
 	}
 	return ansi.Cols[i-4+2], bg, 1
+}
+
+func s(str string) string {
+	if *disableColors {
+		if nc, err := ansi.Cleanse(str); err == nil {
+			return nc
+		}
+	}
+	return str
 }
