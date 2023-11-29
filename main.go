@@ -252,6 +252,7 @@ Examples:`+"\n  "+
 			connectCount, sudoCount int
 			swg                     = sizedwaitgroup.New(*parallel * 2)
 		)
+		hostErrors = make([]string, len(hostList))
 		for iHost, host := range hostList {
 			swg.Add()
 			go func(iHost int, host string) error {
@@ -444,6 +445,7 @@ Examples:`+"\n  "+
 			}*/
 		}
 		swg.Wait()
+		// TODO: Add list by host on what failures were seen using hostErrors array
 
 		if *sudo != "" {
 			fmt.Fprintln(os.Stderr, "Login was successful on", connectCount, "hosts and sudo on", sudoCount, "hosts")
